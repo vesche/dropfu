@@ -1,0 +1,98 @@
+.sidebar {
+  width: 220px;
+  min-width: 180px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.header {
+  padding: 8px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.1s;
+  user-select: none;
+}
+.item:hover {
+  background: var(--bg-tertiary);
+}
+.selected {
+  border-left-color: var(--accent);
+  background: var(--bg-tertiary);
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.statusGreen {
+  background: #4caf50;
+  box-shadow: 0 0 4px #4caf5080;
+}
+.statusYellow {
+  background: #ff9800;
+  box-shadow: 0 0 4px #ff980080;
+}
+.statusRed {
+  background: #f44336;
+  box-shadow: 0 0 4px #f4433680;
+}
+
+.badge {
+  color: var(--accent);
+  font-weight: 700;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.hostname {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.seen {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.empty {
+  padding: 20px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}

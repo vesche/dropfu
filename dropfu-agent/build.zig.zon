@@ -1,0 +1,8 @@
+.{
+    .name = .dropfu_agent,
+    .version = "1.0.0",
+    .fingerprint = 0x9325611004a5b1bb,
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{""},
+}
