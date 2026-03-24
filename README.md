@@ -4,7 +4,7 @@ Cross-platform incident response toolkit. Deploy a lightweight agent on target
 endpoints, coordinate operations through a relay server, and drive everything
 from a fast web-based command interface.
 
-<https://github.com/user-attachments/assets/f54d2443-3414-4afa-8835-c061b7bd1db3>
+<https://github.com/user-attachments/assets/9497107e-3aa2-4ea1-acb8-12135ed9e6dc>
 
 ```
 ┌──────────────┐     WSS      ┌──────────────┐     WSS      ┌──────────────┐
