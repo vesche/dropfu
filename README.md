@@ -54,13 +54,19 @@ Verify:
 bash scripts/verify.sh
 ```
 
+The verification suite runs Zig unit tests, native builds, isolated Windows and
+Linux ARM cross-builds, plugin package/runtime tests, client protocol/state/WS
+tests, production frontend compilation, dependency audit, and a black-box
+server/agent test covering authentication, heartbeat, shell, plugin install/run,
+binary upload/download, reconnect replacement, and duplicate-port rejection.
+
 ## Cross-platform agent builds
 
 ```bash
 cd dropfu-agent
-zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall
-zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall
-zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall
+zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall --prefix zig-out/windows-x86_64
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall --prefix zig-out/macos-aarch64
+zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-aarch64
 ```
 
 | Platform | Elevated run |

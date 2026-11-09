@@ -5,7 +5,7 @@ import { parseMessage, MSG_HEARTBEAT, generateId, PROTOCOL_VERSION } from "./pro
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "auth_required";
 
 function deriveWsUrl(): string {
-  const env = import.meta.env.VITE_WS_URL;
+  const env = import.meta.env?.VITE_WS_URL;
   if (env) return env as string;
   const loc = typeof window !== "undefined" ? window.location : undefined;
   if (loc) {
@@ -16,7 +16,7 @@ function deriveWsUrl(): string {
 }
 
 function deriveHttpBase(): string {
-  const env = import.meta.env.VITE_HTTP_URL;
+  const env = import.meta.env?.VITE_HTTP_URL;
   if (env) return env as string;
   const loc = typeof window !== "undefined" ? window.location : undefined;
   if (loc) return `${loc.protocol}//${loc.host}`;
@@ -89,26 +89,30 @@ export function connect(): void {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   intentionalClose = false;
   setStatus("connecting");
-  ws = new WebSocket(WS_URL);
+  const socket = new WebSocket(WS_URL);
+  ws = socket;
 
-  ws.onopen = () => {
+  socket.onopen = () => {
+    if (ws !== socket) return;
     setStatus("connected");
     reconnectAttempt = 0;
     startHeartbeat();
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws !== socket) return;
     clearHeartbeat();
     setStatus("disconnected");
     ws = null;
     scheduleReconnect();
   };
 
-  ws.onerror = () => {
-    ws?.close();
+  socket.onerror = () => {
+    socket.close();
   };
 
-  ws.onmessage = (ev) => {
+  socket.onmessage = (ev) => {
+    if (ws !== socket) return;
     try {
       const raw = JSON.parse(ev.data as string);
       const msg = parseMessage(raw);
@@ -150,6 +154,25 @@ export function send(msg: Envelope): boolean {
 export function onMessage(handler: MessageHandler): () => void {
   handlers.add(handler);
   return () => handlers.delete(handler);
+}
+
+export function waitForMessage(
+  predicate: (msg: AnyMessage) => boolean,
+  timeoutMs = 10_000,
+): Promise<AnyMessage> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      handlers.delete(handler);
+      reject(new Error("timed out waiting for server response"));
+    }, timeoutMs);
+    const handler: MessageHandler = (msg) => {
+      if (!predicate(msg)) return;
+      clearTimeout(timer);
+      handlers.delete(handler);
+      resolve(msg);
+    };
+    handlers.add(handler);
+  });
 }
 
 export { status };

@@ -4,8 +4,8 @@ const protocol = @import("dropfu_protocol");
 const websocket = @import("websocket.zig");
 
 pub const PendingRoute = struct {
-    request_id: []const u8,
     client_id: u64,
+    keep_until_eof: bool = false,
 };
 
 pub const AgentConn = struct {
@@ -18,6 +18,11 @@ pub const AgentConn = struct {
     last_seen: i64,
     write_mutex: std.Io.Mutex = .init,
     alive: bool = true,
+};
+
+pub const AgentRegistration = struct {
+    id: []const u8,
+    conn: *AgentConn,
 };
 
 pub const ClientConn = struct {
@@ -34,7 +39,7 @@ io: std.Io,
 mutex: std.Io.Mutex = .init,
 agents: std.StringHashMap(*AgentConn),
 clients: std.ArrayList(*ClientConn) = .empty,
-pending: std.StringHashMap(u64), // request_id -> client_id
+pending: std.StringHashMap(PendingRoute), // request_id -> route metadata
 next_client_id: u64 = 1,
 
 pub fn init(allocator: Allocator, io: std.Io) Self {
@@ -42,7 +47,7 @@ pub fn init(allocator: Allocator, io: std.Io) Self {
         .allocator = allocator,
         .io = io,
         .agents = std.StringHashMap(*AgentConn).init(allocator),
-        .pending = std.StringHashMap(u64).init(allocator),
+        .pending = std.StringHashMap(PendingRoute).init(allocator),
     };
 }
 
@@ -93,7 +98,7 @@ pub fn removeClient(self: *Self, client: *ClientConn) void {
     defer to_remove.deinit(self.allocator);
     var it = self.pending.iterator();
     while (it.next()) |entry| {
-        if (entry.value_ptr.* == client.id) {
+        if (entry.value_ptr.client_id == client.id) {
             to_remove.append(self.allocator, entry.key_ptr.*) catch {};
         }
     }
@@ -105,7 +110,7 @@ pub fn removeClient(self: *Self, client: *ClientConn) void {
     self.allocator.destroy(client);
 }
 
-pub fn registerAgent(self: *Self, allocator: Allocator, raw: []const u8, stream: websocket.Conn) ![]const u8 {
+pub fn registerAgent(self: *Self, allocator: Allocator, raw: []const u8, stream: websocket.Conn) !AgentRegistration {
     var parsed = try protocol.parse(allocator, raw);
     defer parsed.deinit();
 
@@ -126,12 +131,21 @@ pub fn registerAgent(self: *Self, allocator: Allocator, raw: []const u8, stream:
 
     const now = protocol.timestamp(self.io);
     const agent = try self.allocator.create(AgentConn);
+    errdefer self.allocator.destroy(agent);
+    const hostname = try self.allocator.dupe(u8, protocol.getStr(payload, "hostname") orelse "unknown");
+    errdefer self.allocator.free(hostname);
+    const os_name = try self.allocator.dupe(u8, protocol.getStr(payload, "os") orelse "unknown");
+    errdefer self.allocator.free(os_name);
+    const arch = try self.allocator.dupe(u8, protocol.getStr(payload, "arch") orelse "unknown");
+    errdefer self.allocator.free(arch);
+    const privilege = try self.allocator.dupe(u8, protocol.getStr(payload, "privilege") orelse "unknown");
+    errdefer self.allocator.free(privilege);
     agent.* = .{
         .stream = stream,
-        .hostname = try self.allocator.dupe(u8, protocol.getStr(payload, "hostname") orelse "unknown"),
-        .os_name = try self.allocator.dupe(u8, protocol.getStr(payload, "os") orelse "unknown"),
-        .arch = try self.allocator.dupe(u8, protocol.getStr(payload, "arch") orelse "unknown"),
-        .privilege = try self.allocator.dupe(u8, protocol.getStr(payload, "privilege") orelse "unknown"),
+        .hostname = hostname,
+        .os_name = os_name,
+        .arch = arch,
+        .privilege = privilege,
         .connected_at = now,
         .last_seen = now,
     };
@@ -142,35 +156,40 @@ pub fn registerAgent(self: *Self, allocator: Allocator, raw: []const u8, stream:
     if (self.agents.fetchRemove(id)) |old| {
         std.log.warn("replacing existing agent connection for {s}", .{id});
         old.value.alive = false;
-        // Close old stream outside lock would be nicer; best-effort here.
+        old.value.write_mutex.lockUncancelable(self.io);
         websocket.sendClose(old.value.stream);
-        freeAgent(self.allocator, old.value);
-        // Keep the new key allocation; free the old map key.
-        self.allocator.free(old.key);
+        old.value.write_mutex.unlock(self.io);
+        // The old handler still owns this registration and frees it on exit.
     }
 
     try self.agents.put(id, agent);
     std.log.info("agent registered: {s} ({s})", .{ id, agent.hostname });
-    return id;
+    return .{ .id = id, .conn = agent };
 }
 
-pub fn touchAgent(self: *Self, agent_id: []const u8) void {
+pub fn touchAgent(self: *Self, registration: AgentRegistration) void {
     self.lock();
     defer self.unlock();
-    if (self.agents.get(agent_id)) |a| {
-        a.last_seen = protocol.timestamp(self.io);
+    if (self.agents.get(registration.id)) |current| {
+        if (current == registration.conn) current.last_seen = protocol.timestamp(self.io);
     }
 }
 
-pub fn removeAgent(self: *Self, agent_id: []const u8) void {
+pub fn removeAgent(self: *Self, registration: AgentRegistration) void {
     self.lock();
-    defer self.unlock();
-    if (self.agents.fetchRemove(agent_id)) |kv| {
-        kv.value.alive = false;
-        std.log.info("agent disconnected: {s}", .{kv.key});
-        self.allocator.free(kv.key);
-        freeAgent(self.allocator, kv.value);
+    if (self.agents.get(registration.id)) |current| {
+        if (current == registration.conn) {
+            _ = self.agents.remove(registration.id);
+        }
     }
+    registration.conn.alive = false;
+    registration.conn.write_mutex.lockUncancelable(self.io);
+    self.unlock();
+
+    std.log.info("agent disconnected: {s}", .{registration.id});
+    registration.conn.write_mutex.unlock(self.io);
+    self.allocator.free(registration.id);
+    freeAgent(self.allocator, registration.conn);
 }
 
 /// Route a client message to an agent and record correlation so replies return to this client.
@@ -182,9 +201,21 @@ pub fn routeToAgent(self: *Self, allocator: Allocator, client: *ClientConn, raw:
         .object => |o| o,
         else => return error.InvalidMessage,
     };
-    const target = protocol.getStr(root, "agent_id") orelse return error.MissingAgentId;
     const msg_id = protocol.getStr(root, "id") orelse return error.MissingId;
+    if (!protocol.validateId(msg_id)) return error.InvalidId;
     const msg_type = protocol.getMsgType(parsed.value) orelse return error.MissingType;
+
+    // Browser heartbeats keep the client connection alive; they are not
+    // addressed to an agent. Echo them so the client can also observe liveness.
+    if (std.mem.eql(u8, msg_type, protocol.MSG_HEARTBEAT)) {
+        client.write_mutex.lockUncancelable(client.stream.io);
+        defer client.write_mutex.unlock(client.stream.io);
+        try websocket.sendText(client.stream, raw);
+        return;
+    }
+
+    const target = protocol.getStr(root, "agent_id") orelse return error.MissingAgentId;
+    if (!protocol.validateAgentId(target)) return error.InvalidAgentId;
 
     // Only allow client->agent message types.
     const allowed =
@@ -192,8 +223,7 @@ pub fn routeToAgent(self: *Self, allocator: Allocator, client: *ClientConn, raw:
         std.mem.eql(u8, msg_type, protocol.MSG_SHELL_DATA) or
         std.mem.eql(u8, msg_type, protocol.MSG_SHELL_CLOSE) or
         std.mem.eql(u8, msg_type, protocol.MSG_FILE_META) or
-        std.mem.eql(u8, msg_type, protocol.MSG_FILE_CHUNK) or
-        std.mem.eql(u8, msg_type, protocol.MSG_HEARTBEAT);
+        std.mem.eql(u8, msg_type, protocol.MSG_FILE_CHUNK);
     if (!allowed) return error.DisallowedMessageType;
 
     self.lock();
@@ -211,110 +241,81 @@ pub fn routeToAgent(self: *Self, allocator: Allocator, client: *ClientConn, raw:
         std.mem.eql(u8, msg_type, protocol.MSG_FILE_CHUNK) or
         std.mem.eql(u8, msg_type, protocol.MSG_SHELL_DATA))
     {
-        const key = self.allocator.dupe(u8, msg_id) catch {
-            self.unlock();
-            return error.OutOfMemory;
-        };
-        self.pending.put(key, client.id) catch {
-            self.allocator.free(key);
-            self.unlock();
-            return error.OutOfMemory;
-        };
+        const persistent_shell = if (std.mem.eql(u8, msg_type, protocol.MSG_COMMAND)) blk: {
+            const payload = protocol.getObj(root, "payload") orelse break :blk false;
+            const command = protocol.getStr(payload, "command") orelse break :blk false;
+            break :blk std.mem.eql(u8, command, "shell");
+        } else false;
+        if (self.pending.getPtr(msg_id)) |route| {
+            route.client_id = client.id;
+            route.keep_until_eof = route.keep_until_eof or persistent_shell;
+        } else {
+            const key = self.allocator.dupe(u8, msg_id) catch {
+                self.unlock();
+                return error.OutOfMemory;
+            };
+            self.pending.put(key, .{
+                .client_id = client.id,
+                .keep_until_eof = persistent_shell,
+            }) catch {
+                self.allocator.free(key);
+                self.unlock();
+                return error.OutOfMemory;
+            };
+        }
     }
+    agent.write_mutex.lockUncancelable(self.io);
     const stream = agent.stream;
-    var write_mutex = &agent.write_mutex;
     self.unlock();
 
-    write_mutex.lockUncancelable(stream.io);
-    defer write_mutex.unlock(stream.io);
+    defer agent.write_mutex.unlock(stream.io);
     try websocket.sendText(stream, raw);
 }
 
-/// Deliver an agent message back to the originating client when correlated;
-/// fall back to all clients only for agent_list broadcasts.
+/// Deliver an agent message only to the originating client.
 pub fn deliverFromAgent(self: *Self, allocator: Allocator, raw: []const u8) void {
-    var parsed = protocol.parse(allocator, raw) catch {
-        self.broadcastToClients(raw);
-        return;
-    };
+    var parsed = protocol.parse(allocator, raw) catch return;
     defer parsed.deinit();
 
     const root = switch (parsed.value) {
         .object => |o| o,
-        else => {
-            self.broadcastToClients(raw);
-            return;
-        },
+        else => return,
     };
-    const msg_type = protocol.getMsgType(parsed.value) orelse {
-        self.broadcastToClients(raw);
-        return;
-    };
-    const msg_id = protocol.getStr(root, "id");
+    const msg_type = protocol.getMsgType(parsed.value) orelse return;
+    const id = protocol.getStr(root, "id") orelse return;
+    if (!protocol.validateId(id)) return;
 
-    if (protocol.getStr(root, "agent_id")) |aid| {
-        self.touchAgent(aid);
+    self.lock();
+    defer self.unlock();
+    const route = self.pending.get(id) orelse return;
+    // Keep download correlation through the final result and shell correlation
+    // through EOF; upload correlation ends at its file acknowledgement.
+    const drop = (std.mem.eql(u8, msg_type, protocol.MSG_RESULT) and !route.keep_until_eof) or
+        std.mem.eql(u8, msg_type, protocol.MSG_ERROR) or
+        std.mem.eql(u8, msg_type, protocol.MSG_FILE_ACK) or
+        (std.mem.eql(u8, msg_type, protocol.MSG_SHELL_DATA) and blk: {
+            const payload = protocol.getObj(root, "payload") orelse break :blk false;
+            break :blk protocol.getBool(payload, "eof") orelse false;
+        });
+    if (drop) {
+        if (self.pending.fetchRemove(id)) |kv| {
+            self.allocator.free(kv.key);
+        }
     }
-
-    if (msg_id) |id| {
-        self.lock();
-        const client_id = self.pending.get(id);
-        // Keep correlation for multi-chunk transfers / shell sessions until eof/final/result.
-        const drop = std.mem.eql(u8, msg_type, protocol.MSG_RESULT) or
-            std.mem.eql(u8, msg_type, protocol.MSG_ERROR) or
-            std.mem.eql(u8, msg_type, protocol.MSG_FILE_ACK) or
-            (std.mem.eql(u8, msg_type, protocol.MSG_FILE_CHUNK) and blk: {
-                const payload = protocol.getObj(root, "payload") orelse break :blk false;
-                break :blk protocol.getBool(payload, "final") orelse false;
-            }) or
-            (std.mem.eql(u8, msg_type, protocol.MSG_SHELL_DATA) and blk: {
-                const payload = protocol.getObj(root, "payload") orelse break :blk false;
-                break :blk protocol.getBool(payload, "eof") orelse false;
-            });
-        if (drop) {
-            if (self.pending.fetchRemove(id)) |kv| {
-                self.allocator.free(kv.key);
-            }
-        }
-        var target_client: ?*ClientConn = null;
-        if (client_id) |cid| {
-            for (self.clients.items) |c| {
-                if (c.id == cid and c.alive) {
-                    target_client = c;
-                    break;
-                }
-            }
-        }
-        const snapshot = if (target_client) |c|
-            self.allocator.dupe(*ClientConn, &.{c}) catch null
-        else
-            self.allocator.dupe(*ClientConn, self.clients.items) catch null;
-        self.unlock();
-
-        if (snapshot) |list| {
-            defer self.allocator.free(list);
-            for (list) |c| {
-                c.write_mutex.lockUncancelable(c.stream.io);
-                defer c.write_mutex.unlock(c.stream.io);
-                websocket.sendText(c.stream, raw) catch {};
-            }
+    for (self.clients.items) |c| {
+        if (c.id == route.client_id and c.alive) {
+            c.write_mutex.lockUncancelable(c.stream.io);
+            defer c.write_mutex.unlock(c.stream.io);
+            websocket.sendText(c.stream, raw) catch {};
             return;
         }
     }
-
-    self.broadcastToClients(raw);
 }
 
 pub fn broadcastToClients(self: *Self, raw: []const u8) void {
     self.lock();
-    const snapshot = self.allocator.dupe(*ClientConn, self.clients.items) catch {
-        self.unlock();
-        return;
-    };
-    self.unlock();
-    defer self.allocator.free(snapshot);
-
-    for (snapshot) |c| {
+    defer self.unlock();
+    for (self.clients.items) |c| {
         if (!c.alive) continue;
         c.write_mutex.lockUncancelable(c.stream.io);
         defer c.write_mutex.unlock(c.stream.io);

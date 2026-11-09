@@ -4,7 +4,7 @@
 {$DROPFU_DOMAIN:localhost} {
 	encode zstd gzip
 
-	@ws path /ws /agent
+	@ws path /ws
 	reverse_proxy @ws 127.0.0.1:8443
 
 	handle /plugins/* {
@@ -25,7 +25,7 @@
 	file_server
 }
 
-# Agent WebSocket on a high port (optional separate site).
-# https://agents.example.com {
-#   reverse_proxy 127.0.0.1:9443
+# Agent WebSocket must proxy to the dedicated agent listener.
+# agents.example.com {
+# 	reverse_proxy /agent 127.0.0.1:9443
 # }

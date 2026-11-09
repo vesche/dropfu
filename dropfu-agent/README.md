@@ -14,11 +14,11 @@ zig build test
 ### Cross-compilation
 
 ```bash
-zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall
-zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall
-zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall
-zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSmall
-zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall
+zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall --prefix zig-out/windows-x86_64
+zig build -Dtarget=x86_64-macos -Doptimize=ReleaseSmall --prefix zig-out/macos-x86_64
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall --prefix zig-out/macos-aarch64
+zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-x86_64
+zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-aarch64
 ```
 
 ## Run

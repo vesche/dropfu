@@ -129,9 +129,33 @@ pub fn originAllowed(origin: ?[]const u8, allowed: []const []const u8) bool {
     return false;
 }
 
-test "session mint verify" {
-    // lightweight: hash comparison only
-    const a = protocol.hashToken("abcdefghijklmnopqrst");
-    const b = protocol.hashToken("abcdefghijklmnopqrst");
-    try std.testing.expect(std.crypto.timing_safe.eql([32]u8, a, b));
+test "session mint verify and tamper rejection" {
+    const allocator = std.testing.allocator;
+    var session_secret: [32]u8 = undefined;
+    @memset(&session_secret, 0x5a);
+    const tokens = Tokens{
+        .operator_hash = protocol.hashToken("operator-token-1234"),
+        .agent_hash = protocol.hashToken("agent-token-123456"),
+        .session_secret = session_secret,
+    };
+    const session = try tokens.mintSession(allocator, std.testing.io);
+    defer allocator.free(session);
+    try std.testing.expect(tokens.verifySession(allocator, std.testing.io, session));
+
+    session[0] = if (session[0] == '0') '1' else '0';
+    try std.testing.expect(!tokens.verifySession(allocator, std.testing.io, session));
+}
+
+test "cookie and bearer parsing" {
+    try std.testing.expectEqualStrings("secret", extractBearer("Bearer secret").?);
+    try std.testing.expect(extractBearer("Basic secret") == null);
+    try std.testing.expectEqualStrings("abc123", extractCookie("other=x; dropfu_session=abc123; last=y", "dropfu_session").?);
+    try std.testing.expect(extractCookie("other=x", "dropfu_session") == null);
+}
+
+test "origin allowlist requires exact match" {
+    const allowed = [_][]const u8{ "http://127.0.0.1:3000", "https://dropfu.example" };
+    try std.testing.expect(originAllowed("http://127.0.0.1:3000", &allowed));
+    try std.testing.expect(!originAllowed("http://127.0.0.1:3000.evil", &allowed));
+    try std.testing.expect(!originAllowed(null, &allowed));
 }

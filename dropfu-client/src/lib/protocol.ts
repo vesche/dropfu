@@ -130,10 +130,80 @@ export function parseMessage(raw: unknown): AnyMessage | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
   if (typeof obj.type !== "string" || !MSG_TYPES.has(obj.type)) return null;
-  if (typeof obj.id !== "string") return null;
-  if (typeof obj.timestamp !== "number") return null;
-  if (obj.payload === undefined) obj.payload = {};
-  return obj as unknown as AnyMessage;
+  if (typeof obj.id !== "string" || !isHexId(obj.id, 64)) return null;
+  if (typeof obj.timestamp !== "number" || !Number.isFinite(obj.timestamp)) return null;
+  if (obj.protocol_version !== undefined && obj.protocol_version !== PROTOCOL_VERSION) return null;
+
+  const payload = obj.payload ?? {};
+  if (!isRecord(payload)) return null;
+
+  switch (obj.type) {
+    case MSG_AGENT_LIST:
+      if (!Array.isArray(payload.agents) || !payload.agents.every(isAgentEntry)) return null;
+      break;
+    case MSG_COMMAND:
+      if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128) || typeof payload.command !== "string" ||
+          !Array.isArray(payload.args) || !payload.args.every((arg) => typeof arg === "string")) return null;
+      break;
+    case MSG_RESULT:
+      if (typeof payload.status !== "string" || typeof payload.data !== "string") return null;
+      break;
+    case MSG_SHELL_DATA:
+      if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128) || typeof payload.data !== "string" ||
+          (payload.eof !== undefined && typeof payload.eof !== "boolean")) return null;
+      break;
+    case MSG_SHELL_CLOSE:
+      if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128)) return null;
+      break;
+    case MSG_FILE_META:
+      if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128) || typeof payload.direction !== "string" ||
+          typeof payload.filename !== "string" || !isNonNegativeNumber(payload.size) ||
+          (payload.sha256 !== undefined && typeof payload.sha256 !== "string")) return null;
+      break;
+    case MSG_FILE_CHUNK:
+      if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128) || !isNonNegativeNumber(payload.offset) ||
+          typeof payload.data !== "string" ||
+          (payload.final !== undefined && typeof payload.final !== "boolean")) return null;
+      break;
+    case MSG_FILE_ACK:
+      if (typeof payload.status !== "string" ||
+          (payload.sha256 !== undefined && typeof payload.sha256 !== "string") ||
+          (payload.message !== undefined && typeof payload.message !== "string")) return null;
+      break;
+    case MSG_ERROR:
+      if (typeof payload.code !== "string" || typeof payload.message !== "string") return null;
+      break;
+    case MSG_REGISTER:
+    case MSG_HEARTBEAT:
+      break;
+    default:
+      return null;
+  }
+
+  return { ...obj, payload } as unknown as AnyMessage;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isHexId(value: string, maxLength: number): boolean {
+  return value.length > 0 && value.length <= maxLength && /^[0-9a-f]+$/i.test(value);
+}
+
+function isAgentEntry(value: unknown): value is AgentEntry {
+  if (!isRecord(value)) return false;
+  return typeof value.agent_id === "string" && isHexId(value.agent_id, 128) &&
+    typeof value.hostname === "string" &&
+    typeof value.os === "string" &&
+    typeof value.arch === "string" &&
+    typeof value.privilege === "string" &&
+    isNonNegativeNumber(value.connected_at) &&
+    isNonNegativeNumber(value.last_seen);
 }
 
 export function buildCommand(agentId: string, command: string, args: string[]): CommandMessage {

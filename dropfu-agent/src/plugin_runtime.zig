@@ -8,7 +8,8 @@ const plugin_dir = "plugins";
 pub fn install(allocator: Allocator, io: std.Io, environ: std.process.Environ, name: []const u8) ![]const u8 {
     if (!protocol.validatePluginName(name)) return allocator.dupe(u8, "error: invalid plugin name");
 
-    std.Io.Dir.cwd().createDirPath(io, plugin_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, plugin_dir) catch |e|
+        return allocator.print("error: cannot create plugin directory: {}", .{e});
 
     const host = try envOwned(allocator, environ, "DROPFU_SERVER_HOST", "127.0.0.1");
     defer allocator.free(host);
@@ -36,7 +37,8 @@ pub fn install(allocator: Allocator, io: std.Io, environ: std.process.Environ, n
     var tmp: [8192]u8 = undefined;
     var total: usize = 0;
     while (true) {
-        const n = stream.read(&tmp) catch break;
+        const n = stream.read(&tmp) catch |e|
+            return allocator.print("error: plugin download failed: {}", .{e});
         if (n == 0) break;
         total += n;
         if (total > protocol.MAX_PLUGIN_BYTES + 8192) {
@@ -54,6 +56,12 @@ pub fn install(allocator: Allocator, io: std.Io, environ: std.process.Environ, n
     const body = resp.items[hdr_end + 4 ..];
     if (body.len > protocol.MAX_PLUGIN_BYTES)
         return allocator.dupe(u8, "error: plugin too large");
+    if (contentLength(resp.items[0..hdr_end])) |expected| {
+        if (body.len != expected)
+            return allocator.print("error: incomplete plugin response (expected {d} bytes, received {d})", .{ expected, body.len });
+    } else {
+        return allocator.dupe(u8, "error: plugin response missing Content-Length");
+    }
 
     // Atomic install: write to temp then rename.
     var tmp_buf: [512]u8 = undefined;
@@ -63,15 +71,8 @@ pub fn install(allocator: Allocator, io: std.Io, environ: std.process.Environ, n
     const dest = std.fmt.bufPrint(&path_buf, "{s}/{s}.pyz", .{ plugin_dir, name }) catch
         return allocator.dupe(u8, "error: path too long");
 
-    const file = std.Io.Dir.cwd().createFile(io, tmp_path, .{}) catch |e|
-        return allocator.print("error: cannot write plugin file: {}", .{e});
-    defer file.close(io);
-    file.writeStreamingAll(io, body) catch |e|
-        return allocator.print("error: write failed: {}", .{e});
-    file.close(io);
-
-    std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), dest, io) catch |e|
-        return allocator.print("error: install rename failed: {}", .{e});
+    writePluginAtomically(io, std.Io.Dir.cwd(), tmp_path, dest, body) catch |e|
+        return allocator.print("error: plugin install failed: {}", .{e});
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(body);
@@ -109,7 +110,8 @@ pub fn listPackages(allocator: Allocator, io: std.Io, environ: std.process.Envir
     var tmp: [4096]u8 = undefined;
     var total: usize = 0;
     while (true) {
-        const n = stream.read(&tmp) catch break;
+        const n = stream.read(&tmp) catch |e|
+            return allocator.print("error: plugin list download failed: {}", .{e});
         if (n == 0) break;
         total += n;
         if (total > 1024 * 1024) return allocator.dupe(u8, "error: list response too large");
@@ -240,4 +242,46 @@ fn envOwned(allocator: Allocator, environ: std.process.Environ, key: []const u8,
         error.EnvironmentVariableMissing => try allocator.dupe(u8, default),
         else => |e| return e,
     };
+}
+
+fn contentLength(headers: []const u8) ?usize {
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], &std.ascii.whitespace), "Content-Length")) continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], &std.ascii.whitespace);
+        return std.fmt.parseInt(usize, value, 10) catch null;
+    }
+    return null;
+}
+
+fn writePluginAtomically(io: std.Io, dir: std.Io.Dir, tmp_path: []const u8, dest: []const u8, body: []const u8) !void {
+    const file = try dir.createFile(io, tmp_path, .{ .truncate = true });
+    errdefer dir.deleteFile(io, tmp_path) catch {};
+    {
+        defer file.close(io);
+        try file.writeStreamingAll(io, body);
+    }
+    try dir.rename(tmp_path, dir, dest, io);
+}
+
+test "content length parsing" {
+    try std.testing.expectEqual(@as(?usize, 123), contentLength("HTTP/1.1 200 OK\r\ncontent-length: 123\r\nContent-Type: application/octet-stream"));
+    try std.testing.expectEqual(@as(?usize, null), contentLength("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream"));
+    try std.testing.expectEqual(@as(?usize, null), contentLength("HTTP/1.1 200 OK\r\nContent-Length: invalid"));
+}
+
+test "plugin file install is atomic and closes once" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try writePluginAtomically(io, tmp.dir, "portscan.pyz.tmp", "portscan.pyz", "plugin-body");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "portscan.pyz.tmp", .{}));
+
+    const installed = try tmp.dir.readFileAlloc(io, "portscan.pyz", allocator, .limited(64));
+    defer allocator.free(installed);
+    try std.testing.expectEqualStrings("plugin-body", installed);
 }

@@ -1,8 +1,9 @@
 import { createSignal, createEffect, onCleanup, For, onMount, Show } from "solid-js";
 import { buildCommand, buildShellData, buildShellClose, buildFileChunk } from "../lib/protocol";
-import { send, onMessage, status } from "../lib/ws";
+import { parseCommand } from "../lib/commandLine";
+import { send, onMessage, status, waitForMessage } from "../lib/ws";
 import {
-  state, pushOutput, bindRequest, setPaneShell, setPaneAgent, clearPaneOutput,
+  state, pushOutput, bindRequest, completeRequest, setPaneShell, setPaneAgent, clearPaneOutput,
 } from "../state/session";
 import { formatHelp } from "../lib/commands";
 import styles from "./CommandPane.module.css";
@@ -24,7 +25,7 @@ export default function CommandPane(props: Props) {
   const [history, setHistory] = createSignal<string[]>([]);
   const [histIdx, setHistIdx] = createSignal(-1);
   const [stickBottom, setStickBottom] = createSignal(true);
-  const [pending, setPending] = createSignal(0);
+  const pending = () => state.panes[props.paneId]?.pendingRequestIds.length ?? 0;
 
   const outputs = () => state.outputs[props.paneId] ?? [];
 
@@ -65,8 +66,11 @@ export default function CommandPane(props: Props) {
           setPaneShell(props.paneId, null);
         }
       }
-      if (msg.type === "result" || msg.type === "error" || msg.type === "file_ack") {
-        setPending((n) => Math.max(0, n - 1));
+      if (msg.id === shellSessionId() &&
+          (msg.type === "error" || (msg.type === "result" && msg.payload.status !== "success"))) {
+        setShellMode(false);
+        setShellSessionId(null);
+        setPaneShell(props.paneId, null);
       }
     });
     onCleanup(unsub);
@@ -97,12 +101,20 @@ export default function CommandPane(props: Props) {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
+      if (file.size > 100 * 1024 * 1024) {
+        pushOutput(props.paneId, { kind: "error", text: "file exceeds 100 MiB transfer limit", ts: Date.now() / 1000 });
+        return;
+      }
       const start = buildCommand(agentId, "upload", [destPath, String(file.size)]);
       bindRequest(start.id, props.paneId);
       if (!send(start)) {
+        completeRequest(start.id);
         pushOutput(props.paneId, { kind: "error", text: "not connected", ts: Date.now() / 1000 });
         return;
       }
+      const readyPromise = waitForMessage(
+        (msg) => msg.id === start.id && (msg.type === "result" || msg.type === "error"),
+      );
       pushOutput(props.paneId, {
         kind: "info",
         text: `[file] uploading ${file.name} (${file.size} bytes) → ${destPath}`,
@@ -112,8 +124,26 @@ export default function CommandPane(props: Props) {
       const buf = new Uint8Array(await file.arrayBuffer());
       const CHUNK = 48_000;
       let offset = 0;
-      // Wait briefly for "ready" — best-effort; chunks use the command id.
-      await new Promise((r) => setTimeout(r, 100));
+      let ready;
+      try {
+        ready = await readyPromise;
+      } catch (error) {
+        completeRequest(start.id);
+        pushOutput(props.paneId, {
+          kind: "error",
+          text: `upload failed: ${error instanceof Error ? error.message : "no ready response"}`,
+          ts: Date.now() / 1000,
+        });
+        return;
+      }
+      if (ready.type !== "result" || ready.payload.status !== "success" || ready.payload.data !== "ready for upload") {
+        completeRequest(start.id);
+        return;
+      }
+
+      // The ready result completes the command request. Rebind the same transfer
+      // id so the final file acknowledgement returns to this pane.
+      bindRequest(start.id, props.paneId);
       while (offset < buf.length || buf.length === 0) {
         const end = Math.min(offset + CHUNK, buf.length);
         const slice = buf.subarray(offset, end);
@@ -123,6 +153,7 @@ export default function CommandPane(props: Props) {
         const final = end >= buf.length;
         const chunk = buildFileChunk(start.id, agentId, offset, b64, final);
         if (!send(chunk)) {
+          completeRequest(start.id);
           pushOutput(props.paneId, { kind: "error", text: "upload interrupted — disconnected", ts: Date.now() / 1000 });
           return;
         }
@@ -145,6 +176,7 @@ export default function CommandPane(props: Props) {
       if (agentId && sid) {
         if (value === "exit") {
           send(buildShellClose(sid, agentId));
+          completeRequest(sid);
           setShellMode(false);
           setShellSessionId(null);
           setPaneShell(props.paneId, null);
@@ -163,7 +195,17 @@ export default function CommandPane(props: Props) {
     pushHistory(value);
     pushOutput(props.paneId, { kind: "cmd", text: `${prompt()}> ${value}`, ts: Date.now() / 1000 });
 
-    const parts = parseCommand(value);
+    let parts: string[];
+    try {
+      parts = parseCommand(value);
+    } catch (error) {
+      pushOutput(props.paneId, {
+        kind: "error",
+        text: error instanceof Error ? error.message : "invalid command",
+        ts: Date.now() / 1000,
+      });
+      return;
+    }
     const cmd = parts[0]!;
     const args = parts.slice(1);
 
@@ -217,14 +259,13 @@ export default function CommandPane(props: Props) {
     if (cmd === "shell") {
       setShellSessionId(envelope.id);
       setPaneShell(props.paneId, envelope.id);
-      bindRequest(envelope.id, props.paneId);
     }
 
     if (!send(envelope)) {
+      completeRequest(envelope.id);
       pushOutput(props.paneId, { kind: "error", text: "failed to send — disconnected", ts: Date.now() / 1000 });
       return;
     }
-    setPending((n) => n + 1);
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -251,32 +292,6 @@ export default function CommandPane(props: Props) {
         inputRef.value = h[next] ?? "";
       }
     }
-  }
-
-  function parseCommand(input: string): string[] {
-    const result: string[] = [];
-    let current = "";
-    let inQuote = false;
-    let quoteChar = "";
-
-    for (const ch of input) {
-      if (inQuote) {
-        if (ch === quoteChar) inQuote = false;
-        else current += ch;
-      } else if (ch === '"' || ch === "'") {
-        inQuote = true;
-        quoteChar = ch;
-      } else if (ch === " " || ch === "\t") {
-        if (current) {
-          result.push(current);
-          current = "";
-        }
-      } else {
-        current += ch;
-      }
-    }
-    if (current) result.push(current);
-    return result;
   }
 
   function lineClass(kind: string): string {

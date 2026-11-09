@@ -4,7 +4,7 @@ import {
   MSG_AGENT_LIST, MSG_RESULT, MSG_SHELL_DATA, MSG_FILE_META, MSG_FILE_CHUNK,
   MSG_FILE_ACK, MSG_ERROR, MSG_HEARTBEAT,
 } from "./lib/protocol";
-import { connect, onMessage, status, login } from "./lib/ws";
+import { connect, disconnect, onMessage, status, login } from "./lib/ws";
 import {
   state, setState, pushOutput, resolveRequest, completeRequest, ensurePane,
 } from "./state/session";
@@ -57,12 +57,14 @@ export default function App() {
 
         case MSG_RESULT: {
           const pane = resolveRequest(msg.id) ?? activePaneId();
+          const isActiveShell = state.panes[pane]?.shellSessionId === msg.id &&
+            msg.payload.status === "success";
           pushOutput(pane, {
             kind: msg.payload.status === "success" ? "result" : "error",
             text: msg.payload.data,
             ts: msg.timestamp,
           });
-          completeRequest(msg.id);
+          if (!isActiveShell) completeRequest(msg.id);
           break;
         }
 
@@ -103,10 +105,33 @@ export default function App() {
         case MSG_FILE_CHUNK: {
           const t = state.transfers[msg.id];
           if (!t) break;
-          const bytes = b64ToBytes(msg.payload.data || "");
+          if (msg.payload.offset !== t.offset) {
+            pushOutput(t.paneId, {
+              kind: "error",
+              text: `[file] download offset mismatch: expected ${t.offset}, received ${msg.payload.offset}`,
+              ts: msg.timestamp,
+            });
+            break;
+          }
+          let bytes: Uint8Array;
+          try {
+            bytes = b64ToBytes(msg.payload.data);
+          } catch {
+            pushOutput(t.paneId, { kind: "error", text: "[file] invalid base64 data", ts: msg.timestamp });
+            break;
+          }
           setState("transfers", msg.id, "chunks", t.chunks.length, bytes);
           setState("transfers", msg.id, "offset", msg.payload.offset + bytes.length);
           if (msg.payload.final) {
+            const received = msg.payload.offset + bytes.length;
+            if (received !== t.size) {
+              pushOutput(t.paneId, {
+                kind: "error",
+                text: `[file] download size mismatch: expected ${t.size}, received ${received}`,
+                ts: msg.timestamp,
+              });
+              break;
+            }
             const all = state.transfers[msg.id]?.chunks ?? [];
             downloadBlob(t.filename, all);
             pushOutput(t.paneId, {
@@ -115,7 +140,6 @@ export default function App() {
               ts: msg.timestamp,
             });
             setState("transfers", msg.id, "done", true);
-            completeRequest(msg.id);
           }
           break;
         }
@@ -163,7 +187,9 @@ export default function App() {
         setState("authError", "invalid operator token");
         return;
       }
-      setState("authenticated", true);
+      // Reconnect with the newly issued session cookie. Authentication is only
+      // considered complete after the server sends a valid agent list.
+      disconnect();
       connect();
     } catch {
       setState("authError", "login failed — is the server reachable?");

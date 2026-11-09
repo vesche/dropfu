@@ -14,10 +14,16 @@ pub fn main(init: std.process.Init) !void {
     const environ = init.minimal.environ;
 
     const host = init.environ_map.get("DROPFU_SERVER_HOST") orelse "127.0.0.1";
-    const port = envPort(init.environ_map, "DROPFU_SERVER_PORT", 9443);
+    const port = envPort(init.environ_map, "DROPFU_SERVER_PORT", 9443) catch |e| {
+        std.log.err("invalid DROPFU_SERVER_PORT: {}", .{e});
+        return e;
+    };
+    var token_file_data: ?[]u8 = null;
+    defer if (token_file_data) |data| allocator.free(data);
     const token = init.environ_map.get("DROPFU_AGENT_TOKEN") orelse blk: {
         if (init.environ_map.get("DROPFU_AGENT_TOKEN_FILE")) |path| {
             const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096)) catch break :blk "";
+            token_file_data = data;
             break :blk std.mem.trim(u8, data, &std.ascii.whitespace);
         }
         break :blk "";
@@ -28,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const sid = try system_id.compute(allocator, io, environ);
+    defer allocator.free(sid);
 
     std.log.info("dropfu-agent v1.0.0 (protocol {d})", .{protocol.PROTOCOL_VERSION});
     std.log.info("  system-id : {s}", .{sid});
@@ -69,8 +76,10 @@ fn runSession(
 
     const hn = sysHostname(io);
     const priv = privilegeLevel();
+    const registration_id = try protocol.generateId(allocator, io);
+    defer allocator.free(registration_id);
     const reg = try protocol.serialize(allocator, protocol.RegisterMsg{
-        .id = try protocol.generateId(allocator, io),
+        .id = registration_id,
         .agent_id = agent_id,
         .timestamp = protocol.timestamp(io),
         .payload = .{
@@ -89,7 +98,7 @@ fn runSession(
     std.log.info("registered as {s}", .{agent_id});
 
     var session_state = SessionState{};
-    defer session_state.deinit(allocator);
+    defer session_state.deinit(allocator, io);
 
     var buf: [protocol.MAX_PAYLOAD_BYTES]u8 = undefined;
     while (true) {
@@ -98,7 +107,11 @@ fn runSession(
             .text => handleText(allocator, io, environ, stream, &write_mutex, agent_id, msg.payload, &session_state) catch |e| {
                 std.log.err("handle error: {}", .{e});
             },
-            .ping => websocket.sendPong(stream, msg.payload),
+            .ping => {
+                write_mutex.lockUncancelable(io);
+                defer write_mutex.unlock(io);
+                websocket.sendPong(stream, msg.payload);
+            },
             .close => return,
             else => {},
         }
@@ -119,12 +132,8 @@ const SessionState = struct {
     shell: ?commands.ShellSession = null,
     shell_session_id: ?[]const u8 = null,
 
-    fn deinit(self: *SessionState, allocator: Allocator) void {
-        if (self.transfer) |*t| {
-            allocator.free(t.id);
-            allocator.free(t.path);
-            allocator.free(t.tmp_path);
-        }
+    fn deinit(self: *SessionState, allocator: Allocator, io: std.Io) void {
+        clearTransfer(self, allocator, io, true);
         if (self.shell_session_id) |s| allocator.free(s);
         if (self.shell) |*sh| sh.close();
     }
@@ -150,6 +159,7 @@ fn handleText(
 
     const msg_type = protocol.getMsgType(parsed.value) orelse return;
     const msg_id = protocol.getStr(root, "id") orelse return;
+    if (!protocol.validateId(msg_id)) return;
 
     if (std.mem.eql(u8, msg_type, protocol.MSG_HEARTBEAT)) {
         const hb = try protocol.serialize(allocator, protocol.HeartbeatMsg{
@@ -250,29 +260,39 @@ fn handleText(
             try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "usage: upload <dest_path>");
             return;
         }
-        if (ss.transfer) |*t| {
-            allocator.free(t.id);
-            allocator.free(t.path);
-            allocator.free(t.tmp_path);
-            ss.transfer = null;
-        }
-        const dest = try allocator.dupe(u8, args[0]);
-        const tmp = try allocator.print("{s}.dropfu.upload", .{dest});
-        const tid = try allocator.dupe(u8, msg_id);
-        ss.transfer = .{
-            .id = tid,
-            .path = dest,
-            .tmp_path = tmp,
-            .expected_size = if (args.len > 1) std.fmt.parseInt(u64, args[1], 10) catch 0 else 0,
-        };
-        // Truncate temp file
-        const f = std.Io.Dir.cwd().createFile(io, tmp, .{ .truncate = true }) catch |e| {
-            const em = try allocator.print("cannot create upload temp: {}", .{e});
-            defer allocator.free(em);
-            try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "error", em);
+        const expected_size = if (args.len > 1) std.fmt.parseInt(u64, args[1], 10) catch {
+            try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "invalid upload size");
             return;
+        } else 0;
+        if (expected_size > protocol.MAX_TRANSFER_BYTES) {
+            try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "file too large");
+            return;
+        }
+
+        clearTransfer(ss, allocator, io, true);
+        const transfer: TransferState = blk: {
+            const dest = try allocator.dupe(u8, args[0]);
+            errdefer allocator.free(dest);
+            const tmp = try allocator.print("{s}.dropfu.upload", .{dest});
+            errdefer allocator.free(tmp);
+            const tid = try allocator.dupe(u8, msg_id);
+            errdefer allocator.free(tid);
+            // Truncate temp file before publishing the transfer state.
+            const f = std.Io.Dir.cwd().createFile(io, tmp, .{ .truncate = true }) catch |e| {
+                const em = try allocator.print("cannot create upload temp: {}", .{e});
+                defer allocator.free(em);
+                try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "error", em);
+                return;
+            };
+            f.close(io);
+            break :blk .{
+                .id = tid,
+                .path = dest,
+                .tmp_path = tmp,
+                .expected_size = expected_size,
+            };
         };
-        f.close(io);
+        ss.transfer = transfer;
         try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "success", "ready for upload");
         return;
     }
@@ -322,8 +342,9 @@ fn handleUploadChunk(
     ss: *SessionState,
 ) !void {
     const t = &(ss.transfer orelse return);
-    if (!std.mem.eql(u8, t.id, msg_id) and !std.mem.eql(u8, t.id, msg_id)) {
-        // Allow chunks that share the upload command id.
+    if (!std.mem.eql(u8, t.id, msg_id)) {
+        try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "wrong transfer id");
+        return;
     }
     const payload = protocol.getObj(root, "payload") orelse return;
     const offset = protocol.getU64(payload, "offset") orelse return;
@@ -355,28 +376,43 @@ fn handleUploadChunk(
         return;
     }
 
-    const file = std.Io.Dir.cwd().openFile(io, t.tmp_path, .{ .mode = .write_only }) catch {
-        try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "cannot open temp");
-        return;
-    };
-    defer file.close(io);
-    file.writePositionalAll(io, decoded, offset) catch {
-        try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "write failed");
-        return;
-    };
+    {
+        const file = std.Io.Dir.cwd().openFile(io, t.tmp_path, .{ .mode = .write_only }) catch {
+            try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "cannot open temp");
+            return;
+        };
+        defer file.close(io);
+        file.writePositionalAll(io, decoded, offset) catch {
+            try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "write failed");
+            return;
+        };
+    }
     t.hasher.update(decoded);
     t.received += decoded.len;
 
     if (is_final) {
+        if (t.expected_size != 0 and t.received != t.expected_size) {
+            try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", "", "size mismatch");
+            clearTransfer(ss, allocator, io, true);
+            return;
+        }
         const digest = t.hasher.finalResult();
         const hex = try protocol.hexEncode(allocator, &digest);
         defer allocator.free(hex);
 
         std.Io.Dir.cwd().rename(t.tmp_path, std.Io.Dir.cwd(), t.path, io) catch {
             try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "error", hex, "rename failed");
+            clearTransfer(ss, allocator, io, true);
             return;
         };
         try sendFileAck(allocator, io, stream, write_mutex, msg_id, agent_id, "success", hex, "upload complete");
+        clearTransfer(ss, allocator, io, false);
+    }
+}
+
+fn clearTransfer(ss: *SessionState, allocator: Allocator, io: std.Io, delete_temp: bool) void {
+    if (ss.transfer) |t| {
+        if (delete_temp) std.Io.Dir.cwd().deleteFile(io, t.tmp_path) catch {};
         allocator.free(t.id);
         allocator.free(t.path);
         allocator.free(t.tmp_path);
@@ -460,7 +496,9 @@ fn privilegeLevel() []const u8 {
     return "user";
 }
 
-fn envPort(map: *std.process.Environ.Map, name: []const u8, default: u16) u16 {
+fn envPort(map: *std.process.Environ.Map, name: []const u8, default: u16) !u16 {
     const val = map.get(name) orelse return default;
-    return std.fmt.parseInt(u16, val, 10) catch default;
+    const port = std.fmt.parseInt(u16, val, 10) catch return error.InvalidPort;
+    if (port == 0) return error.InvalidPort;
+    return port;
 }

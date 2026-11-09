@@ -18,6 +18,7 @@ __pycache__/
 # Built plugin artifacts
 dropfu-plugins/dist/
 dropfu-server/plugins/
+/plugins/
 
 # TLS certificates
 certs/

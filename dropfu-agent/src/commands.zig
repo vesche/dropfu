@@ -186,7 +186,8 @@ fn cmdSystemInfo(allocator: Allocator, io: std.Io, environ: std.process.Environ)
 }
 
 fn cmdPlugin(allocator: Allocator, io: std.Io, environ: std.process.Environ, args: []const []const u8) ![]const u8 {
-    if (args.len == 0) return allocator.dupe(u8,
+    if (args.len == 0) return allocator.dupe(
+        u8,
         "usage: plugin <subcommand>\n\n" ++
             "  plugin list                 List available plugins\n" ++
             "  plugin install <name>       Download and install a plugin\n" ++

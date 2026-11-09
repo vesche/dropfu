@@ -328,6 +328,7 @@ pub fn hexEncode(allocator: Allocator, bytes: []const u8) ![]u8 {
 }
 
 pub fn hexDecode(allocator: Allocator, hex: []const u8) ![]u8 {
+    if (hex.len > MAX_STRING_LEN * 2) return error.HexTooLong;
     if (hex.len % 2 != 0) return error.InvalidHex;
     const out = try allocator.alloc(u8, hex.len / 2);
     errdefer allocator.free(out);
@@ -362,6 +363,13 @@ test "validateAgentId" {
     try std.testing.expect(!validateAgentId(""));
 }
 
+test "validateId" {
+    try std.testing.expect(validateId("0123456789abcdefABCDEF"));
+    try std.testing.expect(!validateId(""));
+    try std.testing.expect(!validateId("not-an-id"));
+    try std.testing.expect(!validateId("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"));
+}
+
 test "timingSafeEql" {
     try std.testing.expect(timingSafeEql("abc", "abc"));
     try std.testing.expect(!timingSafeEql("abc", "abd"));
@@ -383,6 +391,48 @@ test "hex roundtrip" {
     const decoded = try hexDecode(allocator, hex);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(u8, &original, decoded);
+}
+
+test "hex decode rejects malformed and oversized input" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidHex, hexDecode(allocator, "abc"));
+    try std.testing.expectError(error.InvalidHex, hexDecode(allocator, "zz"));
+
+    const oversized = try allocator.alloc(u8, MAX_STRING_LEN * 2 + 2);
+    defer allocator.free(oversized);
+    @memset(oversized, '0');
+    try std.testing.expectError(error.HexTooLong, hexDecode(allocator, oversized));
+}
+
+test "parse enforces payload limit" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, MAX_PAYLOAD_BYTES + 1);
+    defer allocator.free(oversized);
+    try std.testing.expectError(error.PayloadTooLarge, parse(allocator, oversized));
+}
+
+test "typed JSON accessors reject invalid values" {
+    const allocator = std.testing.allocator;
+    var parsed = try parse(allocator, "{\"negative\":-1,\"positive\":42,\"protocol_version\":1}");
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u64, null), getU64(obj, "negative"));
+    try std.testing.expectEqual(@as(?u64, 42), getU64(obj, "positive"));
+    try std.testing.expectEqual(@as(u32, 1), getProtocolVersion(obj));
+}
+
+test "generateId returns a valid unique identifier" {
+    const allocator = std.testing.allocator;
+    const first = try generateId(allocator, std.testing.io);
+    defer allocator.free(first);
+    const second = try generateId(allocator, std.testing.io);
+    defer allocator.free(second);
+    try std.testing.expect(validateId(first));
+    try std.testing.expect(validateId(second));
+    try std.testing.expect(!std.mem.eql(u8, first, second));
 }
 
 test "protocol serialize parse" {

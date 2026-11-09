@@ -49,7 +49,9 @@ pub fn readMessage(stream: Conn, buf: []u8) !Message {
     var hdr: [2]u8 = undefined;
     try readExact(stream, &hdr);
 
-    const opcode: Opcode = @enumFromInt(@as(u4, @truncate(hdr[0] & 0x0F)));
+    if (hdr[0] & 0x70 != 0) return error.UnsupportedWebSocketExtension;
+    if (hdr[0] & 0x80 == 0) return error.FragmentedMessageUnsupported;
+    const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(hdr[0] & 0x0F))));
     const masked = hdr[1] & 0x80 != 0;
     var payload_len: u64 = hdr[1] & 0x7F;
 
@@ -97,7 +99,7 @@ pub fn sendPing(stream: Conn) void {
 
 fn writeFrameMasked(stream: Conn, opcode: Opcode, payload: []const u8) !void {
     var hdr: [14]u8 = undefined;
-    hdr[0] = 0x80 | @as(u8, @intFromEnum(opcode));
+    hdr[0] = 0x80 | @as(u8, @backingInt(opcode));
     var hdr_len: usize = 6;
 
     if (payload.len < 126) {
