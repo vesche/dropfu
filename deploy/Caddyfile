@@ -1,0 +1,31 @@
+# Example Caddy reverse proxy terminating TLS for dropfu-server.
+# Backend listens on loopback (default). Point DNS / TLS as needed.
+
+{$DROPFU_DOMAIN:localhost} {
+	encode zstd gzip
+
+	@ws path /ws /agent
+	reverse_proxy @ws 127.0.0.1:8443
+
+	handle /plugins/* {
+		reverse_proxy 127.0.0.1:8443
+	}
+
+	handle /login {
+		reverse_proxy 127.0.0.1:8443
+	}
+
+	handle /health {
+		reverse_proxy 127.0.0.1:8443
+	}
+
+	# Serve the built SolidJS client, fall back to index.html for SPA routes.
+	root * /var/www/dropfu
+	try_files {path} /index.html
+	file_server
+}
+
+# Agent WebSocket on a high port (optional separate site).
+# https://agents.example.com {
+#   reverse_proxy 127.0.0.1:9443
+# }

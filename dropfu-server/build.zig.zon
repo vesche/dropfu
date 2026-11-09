@@ -2,7 +2,15 @@
     .name = .dropfu_server,
     .version = "1.0.0",
     .fingerprint = 0xc9d18496739e2f84,
-    .minimum_zig_version = "0.15.0",
-    .dependencies = .{},
-    .paths = .{""},
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .dropfu_protocol = .{
+            .path = "../dropfu-protocol",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
 }

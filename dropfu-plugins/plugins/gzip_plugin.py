@@ -46,15 +46,25 @@ def decompress(archive_path, dest_dir=None):
     dest_dir = os.path.abspath(dest_dir)
 
     with tarfile.open(archive_path, "r:gz") as tar:
-        members = tar.getnames()
+        members = tar.getmembers()
+        safe_members = []
         for member in members:
-            norm = os.path.normpath(member)
-            if norm.startswith("..") or os.path.isabs(norm):
-                raise ValueError(f"Unsafe path in archive: {member}")
-        tar.extractall(path=dest_dir)
+            norm = os.path.normpath(member.name)
+            if norm.startswith("..") or os.path.isabs(norm) or norm.startswith("/"):
+                raise ValueError(f"Unsafe path in archive: {member.name}")
+            # Prevent absolute destination escapes after join.
+            target = os.path.realpath(os.path.join(dest_dir, norm))
+            if not target.startswith(os.path.realpath(dest_dir) + os.sep) and target != os.path.realpath(dest_dir):
+                raise ValueError(f"Unsafe path in archive: {member.name}")
+            safe_members.append(member)
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(path=dest_dir, members=safe_members, filter="data")
+        else:
+            tar.extractall(path=dest_dir, members=safe_members)
+        member_names = [m.name for m in safe_members]
 
-    lines = [f"Extracted {archive_path} -> {dest_dir}", f"{len(members)} file(s):"]
-    for m in members:
+    lines = [f"Extracted {archive_path} -> {dest_dir}", f"{len(member_names)} file(s):"]
+    for m in member_names:
         lines.append(f"  {m}")
     return "\n".join(lines)
 

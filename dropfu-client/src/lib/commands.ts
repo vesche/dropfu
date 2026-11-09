@@ -55,6 +55,8 @@ export const PLUGINS: PluginDef[] = [
   { name: "ping",     usage: "ping [--count N] [--timeout N] <target>", description: "Ping a host" },
   { name: "ps",       usage: "ps [--sort cpu|mem|pid] [--top N]",      description: "List running processes" },
   { name: "gzip",     usage: "gzip compress|decompress <path> [opts]", description: "Compress/decompress files" },
+  { name: "hash",     usage: "hash [--algo sha256|md5|sha1] <path>",   description: "Compute file digests" },
+  { name: "portscan", usage: "portscan [--ports ...] <host>",          description: "Bounded TCP port scan" },
 ];
 
 export function formatHelp(): string {

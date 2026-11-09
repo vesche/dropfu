@@ -26,9 +26,10 @@ SKIP_FILES = {"__init__.py", "base.py"}
 # Pure-Python packages to bundle inside each plugin's zipapp.
 # Packages with C extensions (psutil) must be installed system-wide.
 PLUGIN_DEPS = {
-    "file_plugin.py": ["filetype"],
-    "ipconfig_plugin.py": ["ifaddr"],
-    "ping_plugin.py": ["ping3"],
+    "file_plugin.py": ["filetype==1.2.0"],
+    "ipconfig_plugin.py": ["ifaddr==0.2.0"],
+    "ping_plugin.py": ["ping3==4.0.8"],
+    # hash_plugin.py and portscan_plugin.py are stdlib-only
 }
 
 

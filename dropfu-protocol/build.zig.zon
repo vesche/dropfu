@@ -1,0 +1,12 @@
+.{
+    .name = .dropfu_protocol,
+    .version = "1.0.0",
+    .fingerprint = 0xb1512535df162a4b,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

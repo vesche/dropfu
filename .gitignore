@@ -1,6 +1,8 @@
 # Zig build artifacts
 .zig-cache/
+**/zig-cache/
 zig-out/
+**/zig-out/
 
 # Node.js
 node_modules/

@@ -1,83 +1,42 @@
 # dropfu-server
 
-Multi-purpose WebSocket relay and coordination server for the dropfu toolkit.
-Bridges communication between `dropfu-client` (incident responder UI) and one
-or more `dropfu-agent` instances deployed on target endpoints.
+Zig 0.17 relay between the operator UI and agents. Hosts authenticated plugin downloads and optional static UI assets.
+
+## Build
+
+```bash
+zig build
+zig build -Doptimize=ReleaseSafe
+zig build test
+```
+
+## Run
+
+```bash
+export DROPFU_OPERATOR_TOKEN='…at least 16 chars…'
+export DROPFU_AGENT_TOKEN='…at least 16 chars…'
+./zig-out/bin/dropfu-server
+```
+
+Defaults bind to **loopback**. For reverse-proxy deployments:
+
+```bash
+DROPFU_BIND_ALL=1 DROPFU_STATIC_DIR=/var/www/dropfu ./zig-out/bin/dropfu-server
+```
 
 ## Ports
 
 | Port | Default | Purpose |
 |------|---------|---------|
-| Client port | `8443` | WebSocket for clients + HTTP for plugin downloads |
-| Agent port | `9443` | WebSocket for agent connections |
+| Client | `8443` | Operator WebSocket, `/login`, `/plugins`, static |
+| Agent | `9443` | Agent WebSocket |
 
-Ports are configurable via environment variables.
+## Auth
 
-## Build
+- Operator browser: `POST /login` with `{"token":"..."}` → `dropfu_session` cookie; WebSocket `/` or `/ws` must present that cookie.
+- Agent: `Authorization: Bearer <agent-token>` on upgrade.
+- Plugin HTTP requires agent or operator bearer / valid session.
 
-```bash
-# Requires Zig >= 0.15
-zig build
+## TLS
 
-# Optimised release build
-zig build -Doptimize=ReleaseSafe
-```
-
-The binary is placed in `zig-out/bin/dropfu-server`.
-
-## Run
-
-```bash
-# Defaults: client port 8443, agent port 9443, plugins in ./plugins
-./zig-out/bin/dropfu-server
-
-# Custom configuration
-DROPFU_CLIENT_PORT=443 \
-DROPFU_AGENT_PORT=9443 \
-DROPFU_PLUGIN_DIR=/opt/dropfu/plugins \
-  ./zig-out/bin/dropfu-server
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DROPFU_CLIENT_PORT` | `8443` | Port for client WebSocket + HTTP |
-| `DROPFU_AGENT_PORT` | `9443` | Port for agent WebSocket |
-| `DROPFU_PLUGIN_DIR` | `./plugins` | Directory containing `.pyz` plugin artifacts |
-
-## TLS (Production)
-
-The server itself runs plain TCP. For WSS/HTTPS, place an nginx or caddy
-reverse proxy in front. Example nginx config:
-
-```nginx
-server {
-    listen 443 ssl;
-    ssl_certificate     /etc/dropfu/cert.pem;
-    ssl_certificate_key /etc/dropfu/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8443;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
-
-Generate self-signed certs for development with `../scripts/gen_certs.sh`.
-
-## Plugin Hosting
-
-Place compiled plugin `.pyz` files in the plugin directory. Agents fetch them
-via `GET /plugins/<name>.pyz`. The build pipeline in `../dropfu-plugins/`
-produces these artifacts.
-
-## HTTP Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Returns `200 OK` with body `ok` |
-| `GET /plugins/list` | Returns JSON array of available plugin names |
-| `GET /plugins/<name>.pyz` | Download a plugin zipapp |
+Terminate TLS with Caddy or nginx. Examples in [`../deploy/`](../deploy/).

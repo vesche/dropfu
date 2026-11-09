@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Protocol tests
+        run: cd dropfu-protocol && zig build test
+      - name: Server build + test
+        run: cd dropfu-server && zig build -Doptimize=Debug && zig build test
+      - name: Agent build + test
+        run: cd dropfu-agent && zig build -Doptimize=Debug && zig build test
+      - name: Agent cross-compile
+        run: |
+          cd dropfu-agent
+          zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall
+          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall
+          zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dropfu-client/package-lock.json
+      - name: Install + typecheck + build
+        working-directory: dropfu-client
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm audit --audit-level=high
+
+  plugins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test + build plugins
+        run: |
+          python3 dropfu-plugins/tests/test_plugins.py
+          python3 -m pip install -q filetype==1.2.0 ifaddr==0.2.0 ping3==4.0.8
+          python3 dropfu-plugins/tools/build_plugins.py

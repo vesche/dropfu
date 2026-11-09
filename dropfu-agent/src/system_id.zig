@@ -4,33 +4,32 @@ const Allocator = std.mem.Allocator;
 
 /// Compute a stable, repeatable system identifier by hashing platform-specific
 /// machine identity markers (machine-id, primary MAC, hostname).
-pub fn compute(allocator: Allocator) ![]const u8 {
+pub fn compute(allocator: Allocator, io: std.Io, environ: std.process.Environ) ![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var fed: usize = 0;
 
     switch (builtin.os.tag) {
         .linux => {
-            feedFile(&hasher, "/etc/machine-id");
-            feedFile(&hasher, "/var/lib/dbus/machine-id");
-            feedMac(&hasher, allocator);
+            if (feedFile(io, &hasher, "/etc/machine-id")) fed += 1;
+            if (feedFile(io, &hasher, "/var/lib/dbus/machine-id")) fed += 1;
+            if (feedMac(io, &hasher)) fed += 1;
         },
         .macos => {
-            feedCommand(&hasher, allocator, &.{ "ioreg", "-rd1", "-c", "IOPlatformExpertDevice" });
-            feedMac(&hasher, allocator);
+            if (feedCommand(allocator, io, &hasher, &.{ "ioreg", "-rd1", "-c", "IOPlatformExpertDevice" })) fed += 1;
+            if (feedMac(io, &hasher)) fed += 1;
         },
         .windows => {
-            if (std.process.getEnvVarOwned(allocator, "COMPUTERNAME")) |v| {
-                hasher.update(v);
-                allocator.free(v);
-            } else |_| {}
-            if (std.process.getEnvVarOwned(allocator, "USERDOMAIN")) |v| {
-                hasher.update(v);
-                allocator.free(v);
-            } else |_| {}
+            if (feedEnv(allocator, environ, &hasher, "COMPUTERNAME")) fed += 1;
+            if (feedEnv(allocator, environ, &hasher, "USERDOMAIN")) fed += 1;
+            // MachineGuid via PowerShell if available.
+            if (feedCommand(allocator, io, &hasher, &.{ "powershell", "-NoProfile", "-Command", "(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid" })) fed += 1;
         },
         else => {},
     }
 
-    feedHostname(&hasher, allocator);
+    if (feedHostname(allocator, io, environ, &hasher)) fed += 1;
+
+    if (fed == 0) return error.NoIdentityMaterial;
 
     const digest = hasher.finalResult();
     var hex: [64]u8 = undefined;
@@ -41,54 +40,69 @@ pub fn compute(allocator: Allocator) ![]const u8 {
     return allocator.dupe(u8, &hex);
 }
 
-// ---------------------------------------------------------------------------
-fn feedFile(hasher: *std.crypto.hash.sha2.Sha256, path: []const u8) void {
-    const f = std.fs.openFileAbsolute(path, .{}) catch return;
-    defer f.close();
+fn feedFile(io: std.Io, hasher: *std.crypto.hash.sha2.Sha256, path: []const u8) bool {
+    const f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer f.close(io);
     var buf: [256]u8 = undefined;
-    const n = f.read(&buf) catch return;
-    hasher.update(std.mem.trim(u8, buf[0..n], &std.ascii.whitespace));
+    const n = f.readPositionalAll(io, &buf, 0) catch return false;
+    const trimmed = std.mem.trim(u8, buf[0..n], &std.ascii.whitespace);
+    if (trimmed.len == 0) return false;
+    hasher.update(trimmed);
+    return true;
 }
 
-fn feedHostname(hasher: *std.crypto.hash.sha2.Sha256, allocator: Allocator) void {
+fn feedHostname(allocator: Allocator, io: std.Io, environ: std.process.Environ, hasher: *std.crypto.hash.sha2.Sha256) bool {
     if (builtin.os.tag == .windows) {
-        if (std.process.getEnvVarOwned(allocator, "COMPUTERNAME")) |v| {
-            hasher.update(v);
-            allocator.free(v);
-        } else |_| {}
+        return feedEnv(allocator, environ, hasher, "COMPUTERNAME");
     } else {
-        var buf: [256]u8 = undefined;
-        const f = std.fs.openFileAbsolute("/etc/hostname", .{}) catch return;
-        defer f.close();
-        const n = f.read(&buf) catch return;
-        hasher.update(std.mem.trim(u8, buf[0..n], &std.ascii.whitespace));
+        return feedFile(io, hasher, "/etc/hostname");
     }
 }
 
-fn feedMac(hasher: *std.crypto.hash.sha2.Sha256, _: Allocator) void {
-    if (builtin.os.tag != .linux) return;
-    var dir = std.fs.openDirAbsolute("/sys/class/net", .{ .iterate = true }) catch return;
-    defer dir.close();
+fn feedEnv(allocator: Allocator, environ: std.process.Environ, hasher: *std.crypto.hash.sha2.Sha256, key: []const u8) bool {
+    const v = std.process.Environ.getAlloc(environ, allocator, key) catch return false;
+    defer allocator.free(v);
+    if (v.len == 0) return false;
+    hasher.update(v);
+    return true;
+}
+
+fn feedMac(io: std.Io, hasher: *std.crypto.hash.sha2.Sha256) bool {
+    if (builtin.os.tag != .linux) return false;
+    var dir = std.Io.Dir.openDirAbsolute(io, "/sys/class/net", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(io) catch null) |entry| {
         if (std.mem.eql(u8, entry.name, "lo")) continue;
         var pbuf: [256]u8 = undefined;
         const p = std.fmt.bufPrint(&pbuf, "/sys/class/net/{s}/address", .{entry.name}) catch continue;
-        const f = std.fs.openFileAbsolute(p, .{}) catch continue;
-        defer f.close();
+        const f = std.Io.Dir.openFileAbsolute(io, p, .{}) catch continue;
+        defer f.close(io);
         var mbuf: [64]u8 = undefined;
-        const n = f.read(&mbuf) catch continue;
+        const n = f.readPositionalAll(io, &mbuf, 0) catch continue;
         const mac = std.mem.trim(u8, mbuf[0..n], &std.ascii.whitespace);
         if (mac.len > 0 and !std.mem.eql(u8, mac, "00:00:00:00:00:00")) {
             hasher.update(mac);
-            return;
+            return true;
         }
     }
+    return false;
 }
 
-fn feedCommand(hasher: *std.crypto.hash.sha2.Sha256, allocator: Allocator, argv: []const []const u8) void {
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv }) catch return;
+fn feedCommand(allocator: Allocator, io: std.Io, hasher: *std.crypto.hash.sha2.Sha256, argv: []const []const u8) bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(4096),
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } },
+    }) catch return false;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
+    if (result.stdout.len == 0) return false;
     hasher.update(result.stdout);
+    return true;
+}
+
+test "hex length" {
+    try std.testing.expectEqual(@as(usize, 64), 32 * 2);
 }

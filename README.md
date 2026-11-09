@@ -18,146 +18,85 @@ from a fast web-based command interface.
                               └──────────────┘
 ```
 
-## Components
+Requires **Zig 0.17**, Node.js ≥ 20, Python ≥ 3.10.
 
-| Component | Language | Purpose |
-|-----------|----------|---------|
-| [dropfu-agent](dropfu-agent/) | Zig | Endpoint agent — executes commands, streams shells, transfers files |
-| [dropfu-server](dropfu-server/) | Zig | Relay server — routes messages between clients and agents, hosts plugins |
-| [dropfu-client](dropfu-client/) | TypeScript/SolidJS | Web UI — command console with tiling pane manager |
-| [dropfu-plugins](dropfu-plugins/) | Python | Extensible plugin library — compiled to bytecode zipapps |
+## Security model (single operator)
 
-## Quick Start
+- Separate **operator** and **agent** pre-shared tokens (`DROPFU_OPERATOR_TOKEN`, `DROPFU_AGENT_TOKEN`, min 16 chars; or `*_FILE`).
+- Browser logs in via `POST /login` and receives an `HttpOnly` session cookie.
+- Agents authenticate with `Authorization: Bearer <agent-token>` on WebSocket upgrade and plugin downloads.
+- Server binds **loopback by default**. Set `DROPFU_BIND_ALL=1` only behind a TLS reverse proxy.
+- Put Caddy/nginx in front for TLS. See [deploy/](deploy/).
 
-### Prerequisites
-
-- [Zig](https://ziglang.org/download/) >= 0.15
-- [Node.js](https://nodejs.org/) >= 20 (for the client)
-- [Python](https://python.org/) >= 3.10 (for plugins)
-- pip packages: `psutil` (required on agent for the ps plugin)
-- npm
-
-### Build Everything
+## Quick Start (development)
 
 ```bash
-# Build server
-cd dropfu-server && zig build && cd ..
-
-# Build agent
-cd dropfu-agent && zig build && cd ..
-
-# Build plugins
-cd dropfu-plugins && python3 tools/build_plugins.py && cd ..
-
-# Install client dependencies
-cd dropfu-client && npm install && cd ..
-```
-
-### Run (Development)
-
-The quickest way to get everything running locally:
-
-```bash
+export DROPFU_OPERATOR_TOKEN='dev-operator-token-change-me'
+export DROPFU_AGENT_TOKEN='dev-agent-token-change-me'
+export DROPFU_ALLOW_INSECURE=1
 bash scripts/dev_up.sh
 ```
 
-This starts the server, one local agent, and the client dev server. Open
-`http://localhost:3000` in your browser.
+Open `http://127.0.0.1:3000` and paste the operator token.
 
-Or start each component manually:
+## Build
 
 ```bash
-# Terminal 1 — Server
-cd dropfu-server
-mkdir -p plugins && cp ../dropfu-plugins/dist/*.pyz plugins/
-./zig-out/bin/dropfu-server
-
-# Terminal 2 — Agent
-cd dropfu-agent
-DROPFU_SERVER_HOST=127.0.0.1 DROPFU_SERVER_PORT=9443 ./zig-out/bin/dropfu-agent
-
-# Terminal 3 — Client
-cd dropfu-client
-npx vite --port 3000
+cd dropfu-server && zig build && cd ..
+cd dropfu-agent && zig build && cd ..
+cd dropfu-plugins && python3 tools/build_plugins.py && cd ..
+cd dropfu-client && npm install && npm run build && cd ..
 ```
 
-### TLS (Production)
+Verify:
 
-1. Generate certificates:
-   ```bash
-   bash scripts/gen_certs.sh ./certs
-   ```
+```bash
+bash scripts/verify.sh
+```
 
-2. Place an nginx or caddy reverse proxy in front of the server for TLS
-   termination. See [dropfu-server/README.md](dropfu-server/README.md) for
-   an example nginx config.
-
-3. Point the agent to the TLS endpoint and the client to the WSS URL.
-
-## Cross-Platform Agent Builds
-
-Zig makes cross-compilation straightforward:
+## Cross-platform agent builds
 
 ```bash
 cd dropfu-agent
-
-# Windows x86_64
 zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall
-
-# macOS ARM
 zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall
-
-# Linux ARM
 zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall
 ```
 
-### Running with Root/Admin Privileges
-
-| Platform | Command |
-|----------|---------|
+| Platform | Elevated run |
+|----------|----------------|
 | Linux / macOS | `sudo ./dropfu-agent` |
-| Windows (cmd) | Run cmd as Administrator, then `dropfu-agent.exe` |
-| Windows (PowerShell) | Run PowerShell as Administrator, then `.\dropfu-agent.exe` |
+| Windows | Administrator cmd/PowerShell |
 
-## Client UI
+## Environment
 
-The web interface features:
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DROPFU_OPERATOR_TOKEN` | required | Operator shared secret |
+| `DROPFU_AGENT_TOKEN` | required | Agent shared secret |
+| `DROPFU_CLIENT_PORT` | `8443` | Client WS + HTTP |
+| `DROPFU_AGENT_PORT` | `9443` | Agent WS |
+| `DROPFU_PLUGIN_DIR` | `./plugins` | Hosted `.pyz` plugins |
+| `DROPFU_STATIC_DIR` | empty | Optional built client assets |
+| `DROPFU_ALLOWED_ORIGINS` | localhost defaults | Comma-separated browser Origins |
+| `DROPFU_BIND_ALL` | `0` | Bind `0.0.0.0` (use with TLS proxy) |
+| `DROPFU_ALLOW_INSECURE` | `0` | Dev cleartext / non-Secure cookies |
 
-- **Collapsible agent sidebar** — lists all connected agents with hostname, OS,
-  arch, and privilege level.
-- **Command console** — terminal-like interface bound to the selected agent.
-- **Tiling pane manager** — split and manage panes with keyboard shortcuts:
-  - `Shift + Arrow` split pane in that direction
-  - `Shift + Delete` close active pane
-  - `Shift + Ctrl + Arrow` navigate between panes
-  - `Shift + Backspace` clear screen
+## Implemented vs deferred
 
-## Agent Commands
+**Implemented now:** auth tokens, correlated routing, hardened transfers, shell (line mode), core FS commands, plugin install/run with limits, `file`/`ipconfig`/`ping`/`ps`/`gzip`/`hash`/`portscan`, tiling panes, upload/download UI.
 
-See [dropfu-agent/README.md](dropfu-agent/README.md) for the full command
-reference.
+**Deferred:** embedded CPython, camera/mic/bluetooth/ssh plugins, full PTY/ConPTY interactive terminal, memdump/procdump wrappers, multi-user RBAC.
 
-## Plugin Development
-
-See [dropfu-plugins/README.md](dropfu-plugins/README.md) for instructions on
-writing and packaging new plugins.
-
-## Project Structure
+## Project structure
 
 ```
 dropfu/
-├── dropfu-agent/        Zig agent binary
-│   └── src/
-├── dropfu-server/       Zig server binary
-│   └── src/
-├── dropfu-client/       SolidJS web frontend
-│   └── src/
-├── dropfu-plugins/      Python plugin library
-│   ├── plugins/
-│   ├── tools/
-│   └── dist/            Built .pyz artifacts
-├── scripts/
-│   ├── gen_certs.sh     Generate self-signed TLS certs
-│   └── dev_up.sh        Start all components locally
-└── README.md
+├── dropfu-protocol/   Shared Zig wire protocol
+├── dropfu-agent/      Zig endpoint agent
+├── dropfu-server/     Zig relay + plugin host
+├── dropfu-client/     SolidJS operator UI
+├── dropfu-plugins/    Python plugins → .pyz
+├── deploy/            Caddy/nginx examples
+└── scripts/           dev_up, verify, certs
 ```

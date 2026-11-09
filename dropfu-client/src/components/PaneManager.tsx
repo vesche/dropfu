@@ -1,6 +1,6 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import CommandPane from "./CommandPane";
-import { pushOutput } from "../App";
+import { clearPaneOutput, deletePane, ensurePane } from "../state/session";
 import styles from "./PaneManager.module.css";
 
 type SplitDir = "horizontal" | "vertical";
@@ -25,7 +25,9 @@ function nextPaneId(): string {
 }
 
 function createLeaf(id?: string): LeafNode {
-  return { kind: "leaf", id: id ?? nextPaneId() };
+  const leaf = { kind: "leaf" as const, id: id ?? nextPaneId() };
+  ensurePane(leaf.id);
+  return leaf;
 }
 
 interface Props {
@@ -35,6 +37,12 @@ interface Props {
 
 export default function PaneManager(props: Props) {
   const [tree, setTree] = createSignal<PaneNode>(createLeaf("root"));
+  const [dragging, setDragging] = createSignal<{
+    path: number[];
+    startPos: number;
+    startRatio: number;
+    horizontal: boolean;
+  } | null>(null);
 
   function findAndReplace(
     node: PaneNode,
@@ -87,11 +95,11 @@ export default function PaneManager(props: Props) {
   function closePane(id: string) {
     const leaves = collectLeafIds(tree());
     if (leaves.length <= 1) return;
-
     const closedIdx = leaves.indexOf(id);
     const result = removePane(tree(), id);
     if (result) {
       setTree(result);
+      deletePane(id);
       if (props.activePaneId === id) {
         const remaining = collectLeafIds(result);
         const focusIdx = Math.min(closedIdx, remaining.length - 1);
@@ -133,17 +141,30 @@ export default function PaneManager(props: Props) {
 
     for (const step of path) {
       if (step.node.direction !== axis) continue;
-      if (forward && step.childIdx === 0)
-        return firstLeaf(step.node.children[1]);
-      if (!forward && step.childIdx === 1)
-        return lastLeaf(step.node.children[0]);
+      if (forward && step.childIdx === 0) return firstLeaf(step.node.children[1]);
+      if (!forward && step.childIdx === 1) return lastLeaf(step.node.children[0]);
     }
     return null;
   }
 
+  function updateRatioAt(node: PaneNode, path: number[], ratio: number): PaneNode {
+    if (path.length === 0 || node.kind === "leaf") {
+      if (node.kind === "split") return { ...node, ratio };
+      return node;
+    }
+    const idx = path[0]!;
+    const rest = path.slice(1);
+    const children = [...node.children] as [PaneNode, PaneNode];
+    children[idx] = updateRatioAt(children[idx]!, rest, ratio) as PaneNode;
+    if (rest.length === 0) {
+      return { ...node, ratio: Math.min(0.85, Math.max(0.15, ratio)), children };
+    }
+    return { ...node, children };
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     if (!e.shiftKey) return;
-
+    // Don't steal keys when modifier chord is for browser shortcuts beyond our map.
     if (e.ctrlKey) {
       const dirMap: Record<string, "left" | "right" | "up" | "down"> = {
         ArrowLeft: "left", ArrowRight: "right",
@@ -181,17 +202,37 @@ export default function PaneManager(props: Props) {
         break;
       case "Backspace":
         e.preventDefault();
-        pushOutput(props.activePaneId, { kind: "clear", text: "", ts: Date.now() / 1000 });
+        clearPaneOutput(props.activePaneId);
         break;
     }
   }
 
+  function onPointerMove(e: PointerEvent) {
+    const d = dragging();
+    if (!d) return;
+    const delta = d.horizontal ? e.clientX - d.startPos : e.clientY - d.startPos;
+    // Approximate using window size; good enough for smooth resize.
+    const span = d.horizontal ? window.innerWidth : window.innerHeight;
+    const ratio = d.startRatio + delta / Math.max(span, 1);
+    setTree((t) => updateRatioAt(t, d.path, ratio));
+  }
+
+  function onPointerUp() {
+    setDragging(null);
+  }
+
   onMount(() => {
     window.addEventListener("keydown", handleKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    });
   });
 
-  function renderNode(node: PaneNode): any {
+  function renderNode(node: PaneNode, path: number[] = []): any {
     if (node.kind === "leaf") {
       const leaves = collectLeafIds(tree());
       const canClose = leaves.length > 1;
@@ -205,8 +246,9 @@ export default function PaneManager(props: Props) {
                 closePane(node.id);
               }}
               title="Close pane"
+              aria-label="Close pane"
             >
-              x
+              ×
             </button>
           </Show>
           <CommandPane
@@ -222,22 +264,28 @@ export default function PaneManager(props: Props) {
     return (
       <div
         class={styles.split}
-        style={{
-          "flex-direction": isHorizontal ? "row" : "column",
-        }}
+        style={{ "flex-direction": isHorizontal ? "row" : "column" }}
       >
-        <div
-          class={styles.splitChild}
-          style={{ flex: `${node.ratio} 1 0%` }}
-        >
-          {renderNode(node.children[0])}
+        <div class={styles.splitChild} style={{ flex: `${node.ratio} 1 0%` }}>
+          {renderNode(node.children[0], [...path, 0])}
         </div>
-        <div class={isHorizontal ? styles.gutterH : styles.gutterV} />
         <div
-          class={styles.splitChild}
-          style={{ flex: `${1 - node.ratio} 1 0%` }}
-        >
-          {renderNode(node.children[1])}
+          class={isHorizontal ? styles.gutterH : styles.gutterV}
+          role="separator"
+          aria-orientation={isHorizontal ? "vertical" : "horizontal"}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            setDragging({
+              path,
+              startPos: isHorizontal ? e.clientX : e.clientY,
+              startRatio: node.ratio,
+              horizontal: isHorizontal,
+            });
+          }}
+        />
+        <div class={styles.splitChild} style={{ flex: `${1 - node.ratio} 1 0%` }}>
+          {renderNode(node.children[1], [...path, 1])}
         </div>
       </div>
     );

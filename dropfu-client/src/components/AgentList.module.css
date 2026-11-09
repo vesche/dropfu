@@ -50,16 +50,13 @@
   flex-shrink: 0;
 }
 .statusGreen {
-  background: #4caf50;
-  box-shadow: 0 0 4px #4caf5080;
+  background: var(--accent);
 }
 .statusYellow {
-  background: #ff9800;
-  box-shadow: 0 0 4px #ff980080;
+  background: var(--warning);
 }
 .statusRed {
-  background: #f44336;
-  box-shadow: 0 0 4px #f4433680;
+  background: var(--error);
 }
 
 .badge {
