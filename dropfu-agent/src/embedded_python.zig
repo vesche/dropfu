@@ -22,6 +22,13 @@ const plugin_bootstrap =
 const max_runtime_bytes: u64 = 768 * 1024 * 1024;
 const max_runtime_file_bytes: u64 = 256 * 1024 * 1024;
 
+extern fn dropfu_gzip_decompress(
+    src_ptr: [*]const u8,
+    src_len: usize,
+    dst_ptr: [*]u8,
+    dst_len: usize,
+) isize;
+
 /// Execute a plugin with the CPython distribution carried inside the agent.
 ///
 /// The runtime is expanded lazily into one private temporary directory and
@@ -141,16 +148,24 @@ fn tempBaseOwned(allocator: Allocator, environ: std.process.Environ) ![]u8 {
 }
 
 fn extractRuntime(io: std.Io, root: []const u8) !void {
-    var compressed_reader: std.Io.Reader = .fixed(runtime_data.archive);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor: std.compress.flate.Decompress = .init(
-        &compressed_reader,
-        .gzip,
-        &window,
+    // Inflate with the ReleaseFast helper. Doing this here, in a Debug agent,
+    // is slow enough that the first plugin command misses the client's wait.
+    const decoded_len = gzipStoredSize(runtime_data.archive) orelse return error.CorruptRuntimeArchive;
+    if (decoded_len > max_runtime_bytes) return error.RuntimeArchiveTooLarge;
+    const decoded = std.heap.page_allocator.alloc(u8, decoded_len) catch return error.OutOfMemory;
+    defer std.heap.page_allocator.free(decoded);
+    const inflated = dropfu_gzip_decompress(
+        runtime_data.archive.ptr,
+        runtime_data.archive.len,
+        decoded.ptr,
+        decoded.len,
     );
+    if (inflated < 0 or @as(usize, @intCast(inflated)) != decoded.len) return error.CorruptRuntimeArchive;
+
+    var tar_reader: std.Io.Reader = .fixed(decoded);
     var name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var archive: std.tar.Iterator = .init(&decompressor.reader, .{
+    var archive: std.tar.Iterator = .init(&tar_reader, .{
         .file_name_buffer = &name_buffer,
         .link_name_buffer = &link_buffer,
     });
@@ -194,6 +209,15 @@ fn extractRuntime(io: std.Io, root: []const u8) !void {
     }
 }
 
+/// Gzip ISIZE is the uncompressed length modulo 2^32. Archives this agent
+/// accepts are below that modulus, so the trailer is the exact byte count.
+fn gzipStoredSize(archive: []const u8) ?usize {
+    if (archive.len < 18 or archive[0] != 0x1f or archive[1] != 0x8b) return null;
+    const size = std.mem.readInt(u32, archive[archive.len - 4 ..][0..4], .little);
+    if (size == 0) return null;
+    return size;
+}
+
 fn safeArchivePath(path: []const u8) bool {
     if (path.len == 0 or std.fs.path.isAbsolute(path)) return false;
     if (std.mem.indexOfScalar(u8, path, '\\') != null) return false;
@@ -202,6 +226,23 @@ fn safeArchivePath(path: []const u8) bool {
         if (std.mem.eql(u8, part, "..")) return false;
     }
     return true;
+}
+
+test "optimized gzip inflate round-trips a payload" {
+    const compressed = [_]u8{
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4b, 0x29, 0xca, 0x2f,
+        0x48, 0x2b, 0xd5, 0x2d, 0x2a, 0xcd, 0x2b, 0xc9, 0xcc, 0x4d, 0x05, 0x00, 0x9f, 0x47,
+        0xf2, 0x76, 0x0e, 0x00, 0x00, 0x00,
+    };
+    const expected = "dropfu-runtime";
+    try std.testing.expectEqual(expected.len, gzipStoredSize(&compressed));
+    var decoded: [expected.len]u8 = undefined;
+    const n = dropfu_gzip_decompress(&compressed, compressed.len, &decoded, decoded.len);
+    try std.testing.expectEqual(@as(isize, expected.len), n);
+    try std.testing.expectEqualStrings(expected, &decoded);
+
+    var short: [expected.len - 1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, -1), dropfu_gzip_decompress(&compressed, compressed.len, &short, short.len));
 }
 
 test "runtime archive paths cannot escape extraction root" {

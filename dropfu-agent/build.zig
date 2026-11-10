@@ -43,6 +43,17 @@ pub fn build(b: *std.Build) void {
     root_mod.addImport("dropfu_protocol", protocol_dep.module("dropfu_protocol"));
     root_mod.addImport("python_runtime", python_runtime);
 
+    // ReleaseFast even when the agent itself is Debug. See src/fast_gzip.zig.
+    const fast_gzip = b.addObject(.{
+        .name = "fast_gzip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fast_gzip.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    root_mod.addObject(fast_gzip);
+
     const exe = b.addExecutable(.{
         .name = "dropfu-agent",
         .root_module = root_mod,
@@ -68,6 +79,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("python_runtime", b.createModule(.{
         .root_source_file = b.path("src/python_runtime_test_data.zig"),
     }));
+    unit_tests.root_module.addObject(fast_gzip);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run agent unit tests");
     test_step.dependOn(&run_unit_tests.step);

@@ -200,7 +200,14 @@ def envelope(message_type: str, message_id: str, **fields) -> dict:
     }
 
 
-def command(ws: WebSocketClient, agent_id: str, message_id: str, name: str, args: list[str]) -> dict:
+def command(
+    ws: WebSocketClient,
+    agent_id: str,
+    message_id: str,
+    name: str,
+    args: list[str],
+    timeout: float = 10,
+) -> dict:
     ws.send(
         envelope(
             "command",
@@ -210,7 +217,8 @@ def command(ws: WebSocketClient, agent_id: str, message_id: str, name: str, args
         )
     )
     result = ws.wait_for(
-        lambda msg: msg.get("id") == message_id and msg.get("type") in {"result", "error"}
+        lambda msg: msg.get("id") == message_id and msg.get("type") in {"result", "error"},
+        timeout=timeout,
     )
     assert result["type"] == "result", result
     assert result["payload"]["status"] == "success", result
@@ -482,12 +490,15 @@ def main() -> None:
             assert agent.poll() is None, "agent crashed during plugin install"
             assert Path(agent_cwd, "plugins", "portscan.pyz").is_file()
 
+            # The first plugin run unpacks the embedded interpreter. Debug
+            # agents on a slow CI disk need more than the default command wait.
             scan = command(
                 ws,
                 agent_id,
                 "0000000000000005",
                 "plugin",
                 ["run", "portscan", "--ports", str(client_port), "--timeout", "0.1", "127.0.0.1"],
+                timeout=60,
             )
             assert str(client_port) in scan["payload"]["data"], scan
             runtime_dirs = set(runtime_tmp.glob(".dropfu-python-*"))
