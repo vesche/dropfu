@@ -2,13 +2,14 @@
 """Build script that packages each dropfu plugin as a standalone zipapp.
 
 Each plugin is compiled to bytecode and bundled as a .pyz zipapp with a
-__main__.py entry point. Pure-Python pip dependencies are bundled inside
+__main__.pyc entry point. Pure-Python pip dependencies are bundled inside
 the zipapp. Output goes to dist/.
 
 Usage:
     python3 tools/build_plugins.py
 """
 
+import json
 import os
 import py_compile
 import shutil
@@ -22,9 +23,10 @@ PLUGINS_DIR = os.path.join(ROOT, "plugins")
 DIST_DIR = os.path.join(ROOT, "dist")
 
 SKIP_FILES = {"__init__.py", "base.py"}
+PYTHON_VERSION = (3, 14)
 
-# Pure-Python packages to bundle inside each plugin's zipapp.
-# Packages with C extensions (psutil) must be installed system-wide.
+# Pure-Python packages compiled and bundled inside each plugin zipapp.
+# Native extensions are rejected; plugins cannot depend on endpoint packages.
 PLUGIN_DEPS = {
     "file_plugin.py": ["filetype==1.2.0"],
     "ipconfig_plugin.py": ["ifaddr==0.2.0"],
@@ -41,16 +43,6 @@ def find_plugins():
     return plugins
 
 
-def compile_file(src_path, dest_dir):
-    """Compile a .py file to .pyc and place it in dest_dir."""
-    basename = os.path.basename(src_path)
-    module_name = basename.removesuffix(".py") if hasattr(basename, "removesuffix") else basename[:-3]
-    pyc_path = py_compile.compile(src_path, doraise=True)
-    dest_path = os.path.join(dest_dir, module_name + ".pyc")
-    shutil.copy2(pyc_path, dest_path)
-    return dest_path
-
-
 def install_deps(deps, target_dir):
     """pip install pure-Python deps into target_dir."""
     if not deps:
@@ -59,6 +51,7 @@ def install_deps(deps, target_dir):
         sys.executable, "-m", "pip", "install",
         "--target", target_dir,
         "--no-compile",
+        "--only-binary=:all:",
         "--quiet",
     ] + deps
     subprocess.check_call(cmd)
@@ -67,6 +60,38 @@ def install_deps(deps, target_dir):
         path = os.path.join(target_dir, item)
         if item.endswith(".dist-info") or item == "__pycache__":
             shutil.rmtree(path)
+
+
+def compile_tree(root):
+    """Compile every Python source file in-place, then remove the source."""
+    sources = []
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if filename.endswith(".py"):
+                sources.append(os.path.join(dirpath, filename))
+
+    for source in sorted(sources):
+        relative = os.path.relpath(source, root)
+        py_compile.compile(
+            source,
+            cfile=source + "c",
+            dfile=relative,
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        os.unlink(source)
+
+    native_suffixes = (".so", ".pyd", ".dylib", ".dll")
+    native_files = []
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if filename.lower().endswith(native_suffixes):
+                native_files.append(os.path.relpath(os.path.join(dirpath, filename), root))
+    if native_files:
+        raise RuntimeError(
+            "plugins must be platform-independent; native extensions found: "
+            + ", ".join(sorted(native_files))
+        )
 
 
 def build_zipapp(plugin_file):
@@ -80,9 +105,10 @@ def build_zipapp(plugin_file):
         if deps:
             install_deps(deps, tmpdir)
 
-        # Compile base and plugin
-        compile_file(os.path.join(PLUGINS_DIR, "base.py"), tmpdir)
-        compile_file(os.path.join(PLUGINS_DIR, plugin_file), tmpdir)
+        # Stage base and plugin sources. compile_tree below converts these and
+        # all bundled dependencies to deterministic, sourceless bytecode.
+        shutil.copy2(os.path.join(PLUGINS_DIR, "base.py"), tmpdir)
+        shutil.copy2(os.path.join(PLUGINS_DIR, plugin_file), tmpdir)
 
         # Generate __main__.py entry point
         main_py = os.path.join(tmpdir, "__main__.py")
@@ -103,6 +129,21 @@ def build_zipapp(plugin_file):
             f.write(f"    print('No plugin class found')\n")
             f.write(f"    sys.exit(1)\n")
 
+        with open(os.path.join(tmpdir, "dropfu-plugin.json"), "w") as manifest:
+            json.dump(
+                {
+                    "format": 1,
+                    "name": plugin_name,
+                    "python": f"{PYTHON_VERSION[0]}.{PYTHON_VERSION[1]}",
+                    "platform": "any",
+                },
+                manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        compile_tree(tmpdir)
+
         pyz_path = os.path.join(DIST_DIR, f"{plugin_name}.pyz")
 
         with zipfile.ZipFile(pyz_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -116,6 +157,15 @@ def build_zipapp(plugin_file):
 
 
 def main_build():
+    if sys.version_info[:2] != PYTHON_VERSION:
+        print(
+            "Plugin bytecode must be built with the same CPython minor version "
+            f"embedded in dropfu-agent ({PYTHON_VERSION[0]}.{PYTHON_VERSION[1]}); "
+            f"got {sys.version_info.major}.{sys.version_info.minor}.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     os.makedirs(DIST_DIR, exist_ok=True)
 
     plugins = find_plugins()

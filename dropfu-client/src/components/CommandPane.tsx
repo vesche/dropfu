@@ -61,6 +61,12 @@ export default function CommandPane(props: Props) {
     const unsub = onMessage((msg) => {
       if (msg.type === "shell_data" && msg.id === shellSessionId()) {
         if (msg.payload.eof) {
+          const sid = shellSessionId();
+          const agentId = state.panes[props.paneId]?.agentId ?? state.selectedAgentId;
+          // The process is already gone. Tell the agent to drop the session;
+          // otherwise the next `shell` is refused as still active.
+          if (sid && agentId) send(buildShellClose(sid, agentId));
+          if (sid) completeRequest(sid);
           setShellMode(false);
           setShellSessionId(null);
           setPaneShell(props.paneId, null);

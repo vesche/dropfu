@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const conn = @import("conn.zig");
 const protocol = @import("dropfu_protocol");
+const embedded_python = @import("embedded_python.zig");
 
 const plugin_dir = "plugins";
 
@@ -197,7 +198,13 @@ pub fn uninstall(allocator: Allocator, io: std.Io, name: []const u8) ![]const u8
     return allocator.print("plugin '{s}' uninstalled", .{name});
 }
 
-pub fn execute(allocator: Allocator, io: std.Io, name: []const u8, args: []const []const u8) ![]const u8 {
+pub fn execute(
+    allocator: Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+    name: []const u8,
+    args: []const []const u8,
+) ![]const u8 {
     if (!protocol.validatePluginName(name)) return allocator.dupe(u8, "error: invalid plugin name");
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.pyz", .{ plugin_dir, name }) catch
@@ -206,18 +213,8 @@ pub fn execute(allocator: Allocator, io: std.Io, name: []const u8, args: []const
     std.Io.Dir.cwd().access(io, path, .{}) catch
         return allocator.print("error: plugin '{s}' not installed (run: plugin install {s})", .{ name, name });
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, "python3");
-    try argv.append(allocator, path);
-    for (args) |a| try argv.append(allocator, a);
-
-    const result = std.process.run(allocator, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(protocol.MAX_COMMAND_OUTPUT),
-        .stderr_limit = .limited(256 * 1024),
-        .timeout = .{ .duration = .{ .raw = .fromSeconds(120), .clock = .awake } },
-    }) catch |e| return allocator.print("error: failed to run plugin: {}", .{e});
+    const result = embedded_python.runPlugin(allocator, io, environ, path, args) catch |e|
+        return allocator.print("error: embedded Python {s} failed: {}", .{ embedded_python.version, e });
 
     defer allocator.free(result.stderr);
     const exit_ok = result.term.success();

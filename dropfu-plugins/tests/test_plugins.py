@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import subprocess
 import sys
@@ -101,9 +102,17 @@ class BuildArtifactTests(unittest.TestCase):
                 self.assertGreater(os.path.getsize(artifact), 0)
                 with zipfile.ZipFile(artifact) as archive:
                     names = archive.namelist()
-                    self.assertIn("__main__.py", names)
+                    self.assertIn("__main__.pyc", names)
                     self.assertIn("base.pyc", names)
                     self.assertIn(f"{name}_plugin.pyc", names)
+                    self.assertIn("dropfu-plugin.json", names)
+                    manifest = json.loads(archive.read("dropfu-plugin.json"))
+                    self.assertEqual(manifest["format"], 1)
+                    self.assertEqual(manifest["python"], "3.14")
+                    self.assertFalse(
+                        any(entry.endswith(".py") for entry in names),
+                        f"{artifact} contains Python source",
+                    )
                 result = subprocess.run(
                     [sys.executable, artifact],
                     capture_output=True,

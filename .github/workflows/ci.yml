@@ -13,18 +13,26 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - name: Protocol tests
         run: cd dropfu-protocol && zig build test
       - name: Server build + test
         run: cd dropfu-server && zig build -Doptimize=Debug && zig build test
       - name: Agent build + test
         run: cd dropfu-agent && zig build -Doptimize=Debug && zig build test
+      - name: Embedded Python end-to-end
+        run: |
+          python3 -m pip install -q filetype==1.2.0 ifaddr==0.2.0 ping3==4.0.8
+          python3 dropfu-plugins/tools/build_plugins.py
+          python3 tests/e2e.py
       - name: Agent cross-compile
         run: |
           cd dropfu-agent
-          zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall
-          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall
-          zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall
+          zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSmall --prefix zig-out/windows-x86_64
+          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-aarch64
+          zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall --prefix zig-out/macos-aarch64
 
   client:
     runs-on: ubuntu-latest
@@ -49,9 +57,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Test + build plugins
         run: |
-          python3 dropfu-plugins/tests/test_plugins.py
           python3 -m pip install -q filetype==1.2.0 ifaddr==0.2.0 ping3==4.0.8
           python3 dropfu-plugins/tools/build_plugins.py
+          python3 dropfu-plugins/tests/test_plugins.py

@@ -211,7 +211,7 @@ fn cmdPlugin(allocator: Allocator, io: std.Io, environ: std.process.Environ, arg
 
     if (eql(args[0], "run")) {
         if (args.len < 2) return allocator.dupe(u8, "usage: plugin run <name> [args...]");
-        return plugin_runtime.execute(allocator, io, args[1], if (args.len > 2) args[2..] else &.{});
+        return plugin_runtime.execute(allocator, io, environ, args[1], if (args.len > 2) args[2..] else &.{});
     }
 
     return std.fmt.allocPrint(allocator, "error: unknown subcommand '{s}'. Run 'plugin' for usage.", .{args[0]});
@@ -315,6 +315,16 @@ pub fn handleUpload(
     try file.writePositionalAll(io, decoded, off);
 }
 
+/// Shared with the stdout reader. Set once stdout hits EOF so the session
+/// loop can reap a shell that exited on its own.
+const ShellSync = struct {
+    exited: std.atomic.Value(bool),
+
+    fn markExited(self: *ShellSync) void {
+        self.exited.store(true, .release);
+    }
+};
+
 pub const ShellSession = struct {
     child: std.process.Child,
     stdout_thread: std.Thread,
@@ -323,9 +333,17 @@ pub const ShellSession = struct {
     io: std.Io,
     sid_owned: []const u8,
     allocator: Allocator,
+    sync: *ShellSync,
 
     pub fn writeInput(self: *ShellSession, data: []const u8) void {
         self.stdin_file.writeStreamingAll(self.io, data) catch {};
+    }
+
+    /// True after the shell closes stdout, which happens when the process exits.
+    /// The flag is set before the reader emits the EOF frame, so a later command
+    /// can reap the session even if that frame is still in flight.
+    pub fn hasExited(self: *const ShellSession) bool {
+        return self.sync.exited.load(.acquire);
     }
 
     pub fn close(self: *ShellSession) void {
@@ -334,8 +352,29 @@ pub const ShellSession = struct {
         self.stderr_thread.join();
         _ = self.child.wait(self.io) catch {};
         self.allocator.free(self.sid_owned);
+        self.allocator.destroy(self.sync);
     }
 };
+
+/// Drop bash's startup complaints about having no job control. A syntax
+/// error from the shell itself must still be forwarded.
+fn withoutJobControlNoise(src: []const u8, dest: []u8) []const u8 {
+    var written: usize = 0;
+    var index: usize = 0;
+    while (index < src.len) {
+        const newline = std.mem.indexOfScalarPos(u8, src, index, '\n') orelse src.len;
+        const end = if (newline < src.len) newline + 1 else src.len;
+        const line = src[index..end];
+        const noise = std.mem.indexOf(u8, line, "cannot set terminal process group") != null or
+            std.mem.indexOf(u8, line, "no job control in this shell") != null;
+        if (!noise) {
+            @memcpy(dest[written..][0..line.len], line);
+            written += line.len;
+        }
+        index = end;
+    }
+    return dest[0..written];
+}
 
 pub fn startShell(
     allocator: Allocator,
@@ -345,36 +384,51 @@ pub fn startShell(
     session_id: []const u8,
 ) ?ShellSession {
     const io = stream.io;
-    const shell_path: []const u8 = switch (builtin.os.tag) {
-        .windows => "cmd.exe",
-        else => "/bin/sh",
+    // Interactive so a syntax error is reported and the shell keeps running.
+    // On POSIX the child calls setsid() first: otherwise `sh -i` opens the
+    // agent's controlling terminal and signals its process group.
+    const shell_argv: []const []const u8 = switch (builtin.os.tag) {
+        .windows => &.{"cmd.exe"},
+        else => &.{ "/bin/sh", "-i" },
     };
 
-    const sid_owned = allocator.dupe(u8, session_id) catch return null;
+    const sync = allocator.create(ShellSync) catch return null;
+    sync.* = .{ .exited = .init(false) };
+    const sid_owned = allocator.dupe(u8, session_id) catch {
+        allocator.destroy(sync);
+        return null;
+    };
 
-    var child = std.process.spawn(io, .{
-        .argv = &.{shell_path},
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    }) catch {
+    var child = (if (builtin.os.tag == .windows)
+        std.process.spawn(io, .{
+            .argv = shell_argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        })
+    else
+        spawnIsolatedShell(io)) catch {
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
 
     const stdin_file = child.stdin orelse {
         child.kill(io);
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
     const stdout_file = child.stdout orelse {
         child.kill(io);
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
     const stderr_file = child.stderr orelse {
         child.kill(io);
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
 
@@ -384,6 +438,7 @@ pub fn startShell(
         wm: *std.Io.Mutex,
         aid: []const u8,
         sid: []const u8,
+        sync: *ShellSync,
     };
     const ctx = ReaderCtx{
         .a = allocator,
@@ -391,6 +446,7 @@ pub fn startShell(
         .wm = write_mutex,
         .aid = agent_id,
         .sid = sid_owned,
+        .sync = sync,
     };
 
     const pipeReader = struct {
@@ -398,13 +454,22 @@ pub fn startShell(
             var buf: [4096]u8 = undefined;
             while (true) {
                 var iov: [1][]u8 = .{&buf};
-                const n = fd.readStreaming(c.s.io, &iov) catch break;
-                if (n == 0) break;
+                const n = fd.readStreaming(c.s.io, &iov) catch {
+                    if (send_eof) c.sync.markExited();
+                    break;
+                };
+                if (n == 0) {
+                    if (send_eof) c.sync.markExited();
+                    break;
+                }
+                var filtered: [4096]u8 = undefined;
+                const data = withoutJobControlNoise(buf[0..n], &filtered);
+                if (data.len == 0) continue;
                 const msg = protocol.serialize(c.a, protocol.ShellDataMsg{
                     .id = c.sid,
                     .agent_id = c.aid,
                     .timestamp = protocol.timestamp(c.s.io),
-                    .payload = .{ .data = buf[0..n] },
+                    .payload = .{ .data = data },
                 }) catch continue;
                 defer c.a.free(msg);
                 c.wm.lockUncancelable(c.s.io);
@@ -429,12 +494,14 @@ pub fn startShell(
     const t1 = std.Thread.spawn(.{}, pipeReader, .{ ctx, stdout_file, true }) catch {
         child.kill(io);
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
     const t2 = std.Thread.spawn(.{}, pipeReader, .{ ctx, stderr_file, false }) catch {
         child.kill(io);
         t1.join();
         allocator.free(sid_owned);
+        allocator.destroy(sync);
         return null;
     };
 
@@ -450,7 +517,87 @@ pub fn startShell(
         .io = io,
         .sid_owned = sid_owned,
         .allocator = allocator,
+        .sync = sync,
     };
+}
+
+/// `sh -i` in its own session. Pipes stay the transport, and setsid() keeps
+/// the shell from adopting the agent's controlling terminal.
+fn spawnIsolatedShell(_: std.Io) std.process.SpawnError!std.process.Child {
+    const libc = struct {
+        extern "c" fn pipe(fds: *[2]c_int) c_int;
+        extern "c" fn fork() c_int;
+        extern "c" fn setsid() c_int;
+        extern "c" fn dup2(oldfd: c_int, newfd: c_int) c_int;
+        extern "c" fn close(fd: c_int) c_int;
+        extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+        extern "c" fn _exit(status: c_int) noreturn;
+    };
+
+    var stdin_pipe: [2]c_int = undefined;
+    var stdout_pipe: [2]c_int = undefined;
+    var stderr_pipe: [2]c_int = undefined;
+    if (libc.pipe(&stdin_pipe) != 0) return error.Unexpected;
+    if (libc.pipe(&stdout_pipe) != 0) {
+        closePipe(stdin_pipe);
+        return error.Unexpected;
+    }
+    if (libc.pipe(&stderr_pipe) != 0) {
+        closePipe(stdin_pipe);
+        closePipe(stdout_pipe);
+        return error.Unexpected;
+    }
+
+    const pid = libc.fork();
+    if (pid < 0) {
+        closePipe(stdin_pipe);
+        closePipe(stdout_pipe);
+        closePipe(stderr_pipe);
+        return error.Unexpected;
+    }
+    if (pid == 0) {
+        if (libc.setsid() < 0) libc._exit(127);
+        _ = libc.dup2(stdin_pipe[0], 0);
+        _ = libc.dup2(stdout_pipe[1], 1);
+        _ = libc.dup2(stderr_pipe[1], 2);
+        const opened = [_]c_int{
+            stdin_pipe[0],  stdin_pipe[1],
+            stdout_pipe[0], stdout_pipe[1],
+            stderr_pipe[0], stderr_pipe[1],
+        };
+        for (opened) |fd| {
+            if (fd > 2) _ = libc.close(fd);
+        }
+        const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-i", null };
+        _ = libc.execv("/bin/sh", &argv);
+        libc._exit(127);
+    }
+
+    _ = libc.close(stdin_pipe[0]);
+    _ = libc.close(stdout_pipe[1]);
+    _ = libc.close(stderr_pipe[1]);
+
+    const pipeFile = struct {
+        fn of(fd: c_int) std.Io.File {
+            return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+        }
+    };
+    return .{
+        .id = pid,
+        .thread_handle = {},
+        .stdin = pipeFile.of(stdin_pipe[1]),
+        .stdout = pipeFile.of(stdout_pipe[0]),
+        .stderr = pipeFile.of(stderr_pipe[0]),
+        .request_resource_usage_statistics = false,
+    };
+}
+
+fn closePipe(fds: [2]c_int) void {
+    const libc_close = struct {
+        extern "c" fn close(fd: c_int) c_int;
+    }.close;
+    _ = libc_close(fds[0]);
+    _ = libc_close(fds[1]);
 }
 
 pub fn doSeppuku(io: std.Io, allocator: Allocator) void {

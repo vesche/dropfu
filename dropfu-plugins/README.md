@@ -9,7 +9,7 @@ Cross-platform Python plugins packaged as zipapps (`.pyz`) for dropfu-agent.
 | `file` | filetype | Magic-byte file identification |
 | `ipconfig` | ifaddr | Network interfaces |
 | `ping` | ping3 | ICMP ping |
-| `ps` | psutil (system) | Process list |
+| `ps` | stdlib / native OS interfaces | Process list |
 | `gzip` | stdlib | tar+gzip compress/decompress (path-safe) |
 | `hash` | stdlib | File digests (sha256/md5/sha1/sha512) |
 | `portscan` | stdlib | Bounded TCP connect scanner |
@@ -17,13 +17,19 @@ Cross-platform Python plugins packaged as zipapps (`.pyz`) for dropfu-agent.
 ## Build
 
 ```bash
-python3 tools/build_plugins.py
-python3 tests/test_plugins.py
+# Must be CPython 3.14, matching the interpreter embedded in dropfu-agent.
+python3.14 tools/build_plugins.py
+python3.14 tests/test_plugins.py
 ```
 
 Artifacts land in `dist/*.pyz`. Copy into the server plugin directory.
 
 ## Notes
 
-- Bytecode is tied to the Python version that built the zipapp. Agents should run a matching `python3`.
-- Embedded CPython / native wheel bundling is intentionally deferred.
+- Artifacts contain deterministic, sourceless CPython 3.14 bytecode plus a
+  runtime compatibility manifest.
+- Pure-Python dependencies are compiled and included in each `.pyz`.
+- Native wheels/extensions are rejected because a zipapp cannot load them
+  portably. Plugins must not depend on endpoint-installed Python packages.
+- Agents execute plugins with their bundled CPython 3.14.10 runtime; endpoint
+  Python installations and environment customization are ignored.

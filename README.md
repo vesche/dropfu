@@ -18,7 +18,8 @@ from a fast web-based command interface.
                               └──────────────┘
 ```
 
-Requires **Zig 0.17**, Node.js ≥ 20, Python ≥ 3.10.
+Builds require **Zig 0.17**, Node.js ≥ 20, and CPython 3.14. Endpoints require
+none of these runtimes: `dropfu-agent` is a self-contained executable.
 
 ## Security model (single operator)
 
@@ -90,9 +91,9 @@ zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-
 
 ## Implemented vs deferred
 
-**Implemented now:** auth tokens, correlated routing, hardened transfers, shell (line mode), core FS commands, plugin install/run with limits, `file`/`ipconfig`/`ping`/`ps`/`gzip`/`hash`/`portscan`, tiling panes, upload/download UI.
+**Implemented now:** auth tokens, correlated routing, hardened transfers, shell (line mode), core FS commands, plugin install/run with limits, single-binary bundled CPython, `file`/`ipconfig`/`ping`/`ps`/`gzip`/`hash`/`portscan`, tiling panes, upload/download UI.
 
-**Deferred:** embedded CPython, camera/mic/bluetooth/ssh plugins, full PTY/ConPTY interactive terminal, memdump/procdump wrappers, multi-user RBAC.
+**Deferred:** camera/mic/bluetooth/ssh plugins, full PTY/ConPTY interactive terminal, memdump/procdump wrappers, multi-user RBAC.
 
 ## Project structure
 

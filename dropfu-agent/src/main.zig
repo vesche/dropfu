@@ -161,6 +161,11 @@ fn handleText(
     const msg_id = protocol.getStr(root, "id") orelse return;
     if (!protocol.validateId(msg_id)) return;
 
+    // A shell that exits on its own (syntax error, `exit`, crash) still occupies
+    // the session until something reaps it. Do that before any command so the
+    // next `shell` is not refused as "already active".
+    reapShellIfExited(allocator, ss);
+
     if (std.mem.eql(u8, msg_type, protocol.MSG_HEARTBEAT)) {
         const hb = try protocol.serialize(allocator, protocol.HeartbeatMsg{
             .id = msg_id,
@@ -328,6 +333,17 @@ fn handleText(
                 commands.doSeppuku(io, allocator);
             },
         },
+    }
+}
+
+fn reapShellIfExited(allocator: Allocator, ss: *SessionState) void {
+    const shell = &(ss.shell orelse return);
+    if (!shell.hasExited()) return;
+    shell.close();
+    ss.shell = null;
+    if (ss.shell_session_id) |sid| {
+        allocator.free(sid);
+        ss.shell_session_id = null;
     }
 }
 

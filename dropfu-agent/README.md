@@ -5,11 +5,16 @@ Zig 0.17 endpoint agent. Connects to `dropfu-server` with an agent token, execut
 ## Build
 
 ```bash
-# Requires Zig >= 0.17
+# Requires Zig >= 0.17 and Python >= 3.12 on the build machine only
 zig build
 zig build -Doptimize=ReleaseSmall
 zig build test
 ```
+
+The build downloads a checksum-pinned CPython 3.14.10 runtime for the selected
+target and embeds it in the agent. For reproducible/offline builds, prepare the
+archive separately and pass
+`-Dpython-runtime-archive=/path/to/dropfu-python-runtime.tar.gz`.
 
 ### Cross-compilation
 
@@ -37,4 +42,16 @@ export DROPFU_CLIENT_PORT=8443   # plugin downloads
 
 ## Plugins
 
-Plugins are `.pyz` zipapps fetched over authenticated HTTP from the server. System Python 3 is required on the endpoint for `plugin run`. Pure-Python deps are bundled; `psutil` must be installed on the host for the `ps` plugin.
+Plugins are sourceless CPython 3.14 bytecode zipapps (`.pyz`) fetched over
+authenticated HTTP from the server. The endpoint does **not** need Python
+installed: a target-specific CPython 3.14.10 distribution is carried inside the
+single agent executable and launched by absolute path in isolated mode.
+
+For process isolation and enforceable time/output limits, the runtime is
+expanded into a random private temporary directory only while a plugin runs and
+is removed immediately afterward. `PYTHONHOME`, `PYTHONPATH`, user site
+packages, and `python`/`python3` from `PATH` are ignored.
+
+Only pure-Python plugin dependencies are accepted. Native dependencies must be
+implemented as part of the bundled runtime or replaced with portable stdlib
+code; the current plugins require no endpoint-installed Python packages.

@@ -311,12 +311,27 @@ def main() -> None:
             ), duplicate.stdout.decode(errors="replace")
 
             agent_env = os.environ.copy()
+            fake_path = Path(agent_cwd, "host-python-must-not-run")
+            fake_path.mkdir()
+            fake_python = fake_path / "python3"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "echo 'host python was executed' >&2\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
             agent_env.update(
                 {
                     "DROPFU_AGENT_TOKEN": AGENT_TOKEN,
                     "DROPFU_SERVER_HOST": "127.0.0.1",
                     "DROPFU_SERVER_PORT": str(agent_port),
                     "DROPFU_CLIENT_PORT": str(client_port),
+                    # A host-interpreter implementation fails the plugin run.
+                    # The embedded runtime also has to ignore Python env hooks.
+                    "PATH": str(fake_path) + os.pathsep + agent_env.get("PATH", ""),
+                    "PYTHONHOME": str(Path(agent_cwd, "invalid-python-home")),
+                    "PYTHONPATH": str(Path(agent_cwd, "invalid-python-path")),
                 }
             )
             invalid_agent_env = agent_env.copy()
@@ -389,6 +404,68 @@ def main() -> None:
                 and msg["payload"].get("eof") is True
             )
 
+            # A syntax error must be reported without ending the interactive
+            # shell. A later command on the same session has to succeed, and
+            # the shell exiting by itself must still allow a new one.
+            shell_id = "000000000000000a"
+            shell_started = command(ws, agent_id, shell_id, "shell", [])
+            assert "started" in shell_started["payload"]["data"]
+            ws.send(
+                envelope(
+                    "shell_data",
+                    shell_id,
+                    agent_id=agent_id,
+                    payload={"data": "echo (foo)\n", "eof": False},
+                )
+            )
+            ws.wait_for(
+                lambda msg: msg.get("type") == "shell_data"
+                and msg.get("id") == shell_id
+                and "syntax error" in msg["payload"].get("data", "")
+            )
+            ws.send(
+                envelope(
+                    "shell_data",
+                    shell_id,
+                    agent_id=agent_id,
+                    payload={"data": "echo DROPFU_SHELL_STILL_ALIVE\n", "eof": False},
+                )
+            )
+            ws.wait_for(
+                lambda msg: msg.get("type") == "shell_data"
+                and msg.get("id") == shell_id
+                and "DROPFU_SHELL_STILL_ALIVE" in msg["payload"].get("data", "")
+                and msg["payload"].get("eof") is not True
+            )
+            ws.send(
+                envelope(
+                    "shell_data",
+                    shell_id,
+                    agent_id=agent_id,
+                    payload={"data": "exit\n", "eof": False},
+                )
+            )
+            ws.wait_for(
+                lambda msg: msg.get("type") == "shell_data"
+                and msg.get("id") == shell_id
+                and msg["payload"].get("eof") is True
+            )
+            restarted = command(ws, agent_id, "000000000000000b", "shell", [])
+            assert "started" in restarted["payload"]["data"], restarted
+            ws.send(
+                envelope(
+                    "shell_close",
+                    "000000000000000b",
+                    agent_id=agent_id,
+                    payload={},
+                )
+            )
+            ws.wait_for(
+                lambda msg: msg.get("type") == "shell_data"
+                and msg.get("id") == "000000000000000b"
+                and msg["payload"].get("eof") is True
+            )
+
             plugins = command(ws, agent_id, "0000000000000003", "plugin", ["list"])
             assert "portscan" in plugins["payload"]["data"]
 
@@ -405,6 +482,30 @@ def main() -> None:
                 ["run", "portscan", "--ports", str(client_port), "--timeout", "0.1", "127.0.0.1"],
             )
             assert str(client_port) in scan["payload"]["data"], scan
+
+            installed_ps = command(ws, agent_id, "000000000000000c", "plugin", ["install", "ps"])
+            assert "installed" in installed_ps["payload"]["data"], installed_ps
+            ps_result = command(
+                ws,
+                agent_id,
+                "000000000000000d",
+                "plugin",
+                ["run", "ps", "--sort", "pid", "--top", "1"],
+            )
+            assert "PID" in ps_result["payload"]["data"], ps_result
+
+            installed_file = command(
+                ws, agent_id, "000000000000000e", "plugin", ["install", "file"]
+            )
+            assert "installed" in installed_file["payload"]["data"], installed_file
+            file_result = command(
+                ws,
+                agent_id,
+                "000000000000000f",
+                "plugin",
+                ["run", "file", "plugins/portscan.pyz"],
+            )
+            assert "application/zip" in file_result["payload"]["data"], file_result
 
             upload_data = b"dropfu-e2e-upload\x00\xff"
             upload_path = str(Path(agent_cwd, "uploaded.bin"))
