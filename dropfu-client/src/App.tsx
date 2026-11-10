@@ -6,7 +6,7 @@ import {
 } from "./lib/protocol";
 import { connect, disconnect, onMessage, status, login } from "./lib/ws";
 import {
-  state, setState, pushOutput, resolveRequest, completeRequest, ensurePane,
+  state, setState, pushOutput, resolveRequest, completeRequest, ensurePane, isSilentRequest,
 } from "./state/session";
 import AgentList from "./components/AgentList";
 import PaneManager from "./components/PaneManager";
@@ -59,11 +59,13 @@ export default function App() {
           const pane = resolveRequest(msg.id) ?? activePaneId();
           const isActiveShell = state.panes[pane]?.shellSessionId === msg.id &&
             msg.payload.status === "success";
-          pushOutput(pane, {
-            kind: msg.payload.status === "success" ? "result" : "error",
-            text: msg.payload.data,
-            ts: msg.timestamp,
-          });
+          if (!isSilentRequest(msg.id)) {
+            pushOutput(pane, {
+              kind: msg.payload.status === "success" ? "result" : "error",
+              text: msg.payload.data,
+              ts: msg.timestamp,
+            });
+          }
           if (!isActiveShell) completeRequest(msg.id);
           break;
         }
@@ -157,11 +159,13 @@ export default function App() {
 
         case MSG_ERROR: {
           const pane = resolveRequest(msg.id) ?? activePaneId();
-          pushOutput(pane, {
-            kind: "error",
-            text: `[error] ${msg.payload.code}: ${msg.payload.message}`,
-            ts: msg.timestamp,
-          });
+          if (!isSilentRequest(msg.id)) {
+            pushOutput(pane, {
+              kind: "error",
+              text: `[error] ${msg.payload.code}: ${msg.payload.message}`,
+              ts: msg.timestamp,
+            });
+          }
           if (msg.payload.code === "unauthorized") {
             setState("authenticated", false);
             setState("authError", msg.payload.message);

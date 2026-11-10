@@ -1,13 +1,16 @@
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import CommandPane from "./CommandPane";
+import FileManagerPane from "./FileManagerPane";
 import { clearPaneOutput, deletePane, ensurePane } from "../state/session";
 import styles from "./PaneManager.module.css";
 
 type SplitDir = "horizontal" | "vertical";
+type PaneApp = "command" | "file-manager";
 
 interface LeafNode {
   kind: "leaf";
   id: string;
+  app: PaneApp;
 }
 
 interface SplitNode {
@@ -25,7 +28,7 @@ function nextPaneId(): string {
 }
 
 function createLeaf(id?: string): LeafNode {
-  const leaf = { kind: "leaf" as const, id: id ?? nextPaneId() };
+  const leaf = { kind: "leaf" as const, id: id ?? nextPaneId(), app: "command" as const };
   ensurePane(leaf.id);
   return leaf;
 }
@@ -65,7 +68,7 @@ export default function PaneManager(props: Props) {
     const newId = nextPaneId();
     setTree((t) =>
       findAndReplace(t, props.activePaneId, (leaf) => {
-        const existing: LeafNode = { kind: "leaf", id: leaf.id };
+        const existing: LeafNode = { ...leaf };
         const fresh: LeafNode = createLeaf(newId);
         const children: [PaneNode, PaneNode] =
           position === "before" ? [fresh, existing] : [existing, fresh];
@@ -73,6 +76,10 @@ export default function PaneManager(props: Props) {
       }),
     );
     props.onActivePaneChange(newId);
+  }
+
+  function setPaneApp(id: string, app: PaneApp) {
+    setTree((t) => findAndReplace(t, id, (leaf) => ({ ...leaf, app })));
   }
 
   function collectLeafIds(node: PaneNode): string[] {
@@ -238,7 +245,7 @@ export default function PaneManager(props: Props) {
       const canClose = leaves.length > 1;
       return (
         <div class={styles.leafWrap}>
-          <Show when={canClose}>
+          <Show when={canClose && node.app === "command"}>
             <button
               class={styles.closeBtn}
               onClick={(e) => {
@@ -251,11 +258,24 @@ export default function PaneManager(props: Props) {
               ×
             </button>
           </Show>
-          <CommandPane
-            paneId={node.id}
-            isActive={node.id === props.activePaneId}
-            onFocus={() => props.onActivePaneChange(node.id)}
-          />
+          <Show
+            when={node.app === "file-manager"}
+            fallback={
+              <CommandPane
+                paneId={node.id}
+                isActive={node.id === props.activePaneId}
+                onFocus={() => props.onActivePaneChange(node.id)}
+                onOpenFileManager={() => setPaneApp(node.id, "file-manager")}
+              />
+            }
+          >
+            <FileManagerPane
+              paneId={node.id}
+              isActive={node.id === props.activePaneId}
+              onFocus={() => props.onActivePaneChange(node.id)}
+              onExit={() => setPaneApp(node.id, "command")}
+            />
+          </Show>
         </div>
       );
     }

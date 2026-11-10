@@ -90,6 +90,7 @@ pub const ResultMsg = struct {
     pub const ResultPayload = struct {
         status: []const u8,
         data: []const u8,
+        content_type: []const u8 = "text/plain",
     };
 };
 

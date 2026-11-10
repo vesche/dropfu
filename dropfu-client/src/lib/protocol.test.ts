@@ -8,10 +8,11 @@ describe("protocol", () => {
       type: "result",
       id: "abc",
       timestamp: 1,
-      payload: { status: "success", data: "ok" },
+      payload: { status: "success", data: "ok", content_type: "application/json" },
     });
     assert.ok(msg);
     assert.equal(msg!.type, "result");
+    assert.equal(msg!.type === "result" ? msg!.payload.content_type : null, "application/json");
   });
 
   it("rejects invalid messages", () => {
@@ -19,6 +20,12 @@ describe("protocol", () => {
     assert.equal(parseMessage({ type: "nope", id: "a", timestamp: 1 }), null);
     assert.equal(parseMessage({ type: "result", timestamp: 1 }), null);
     assert.equal(parseMessage({ type: "result", id: "a", timestamp: 1, payload: {} }), null);
+    assert.equal(parseMessage({
+      type: "result",
+      id: "a",
+      timestamp: 1,
+      payload: { status: "success", data: "ok", content_type: 42 },
+    }), null);
     assert.equal(parseMessage({
       type: "agent_list",
       id: "a",

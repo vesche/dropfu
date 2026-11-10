@@ -16,6 +16,19 @@ from hash_plugin import hash_file  # noqa: E402
 from portscan_plugin import parse_ports  # noqa: E402
 from gzip_plugin import compress, decompress  # noqa: E402
 from file_plugin import identify_file  # noqa: E402
+from netstat_plugin import (  # noqa: E402
+    InSockInfo,
+    SocketFdInfo,
+    TcpSockInfo,
+    collect_connections,
+    decode_proc_address,
+    filter_connections,
+    format_connections,
+    parse_netstat_args,
+    parse_proc_net,
+    windows_ipv4,
+    windows_port,
+)
 from tools.build_plugins import find_plugins  # noqa: E402
 
 
@@ -88,6 +101,111 @@ class FilePluginTests(unittest.TestCase):
             with open(text, "w") as f:
                 f.write("plain text\n")
             self.assertIn("text", identify_file(text))
+
+
+class NetstatTests(unittest.TestCase):
+    TCP_LINE = (
+        "   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000     0        0 12345 1 00000000 100 0 0 10 0"
+    )
+    UDP6_LINE = (
+        "22027: 000080FE00000000923D2B0BF19B7157:0222 "
+        "00000000000000000000000000000000:0000 07 00000000:00000000 "
+        "00:00000000 00000000     0        0 64535 2 00000000 0"
+    )
+
+    def test_decodes_proc_addresses(self):
+        self.assertEqual(decode_proc_address("0100007F"), "127.0.0.1")
+        self.assertEqual(
+            decode_proc_address("000080FE00000000923D2B0BF19B7157"),
+            "fe80::b2b:3d92:5771:9bf1",
+        )
+
+    def test_parses_proc_net_tcp_and_udp6(self):
+        tcp = parse_proc_net("sl local_address\n" + self.TCP_LINE + "\n", "tcp")
+        self.assertEqual(len(tcp), 1)
+        self.assertEqual(tcp[0]["local_ip"], "127.0.0.1")
+        self.assertEqual(tcp[0]["local_port"], 80)
+        self.assertEqual(tcp[0]["remote_port"], 0)
+        self.assertEqual(tcp[0]["state"], "LISTEN")
+        self.assertEqual(tcp[0]["inode"], 12345)
+
+        udp = parse_proc_net(self.UDP6_LINE, "udp6")
+        self.assertEqual(udp[0]["local_port"], 546)
+        self.assertEqual(udp[0]["state"], "UNCONN")
+        self.assertEqual(udp[0]["remote_ip"], "::")
+
+    def test_filters_listen_and_state(self):
+        rows = parse_proc_net(self.TCP_LINE, "tcp") + parse_proc_net(self.UDP6_LINE, "udp6")
+        listening = filter_connections(rows, listen_only=True)
+        self.assertEqual([row["proto"] for row in listening], ["tcp", "udp6"])
+        established = filter_connections(rows, state="ESTABLISHED")
+        self.assertEqual(established, [])
+        udp_only = filter_connections(rows, tcp=False, udp=True)
+        self.assertEqual([row["proto"] for row in udp_only], ["udp6"])
+
+    def test_argument_parser(self):
+        options, error = parse_netstat_args(["--tcp", "--listen", "--state", "listen"])
+        self.assertIsNone(error)
+        self.assertEqual(options["state"], "LISTEN")
+        self.assertTrue(options["tcp"])
+        self.assertFalse(options["udp"])
+        self.assertTrue(options["listen_only"])
+        _, error = parse_netstat_args(["--bogus"])
+        self.assertIn("Usage", error)
+
+    def test_format_marks_unbound_remote_address(self):
+        rows = parse_proc_net(self.TCP_LINE, "tcp")
+        text = format_connections(rows)
+        self.assertIn("127.0.0.1:80", text)
+        self.assertIn("*:*", text)
+        self.assertIn("LISTEN", text)
+        self.assertIn("1 connection(s)", text)
+
+    def test_windows_address_and_port_helpers(self):
+        self.assertEqual(windows_ipv4(0x0100007F), "127.0.0.1")
+        self.assertEqual(windows_port(0x5000), 80)
+
+    def test_darwin_socket_struct_matches_proc_info(self):
+        import ctypes
+
+        self.assertEqual(ctypes.sizeof(InSockInfo), 80)
+        self.assertEqual(InSockInfo.insi_laddr.offset, 48)
+        self.assertEqual(TcpSockInfo.tcpsi_state.offset, 80)
+        self.assertEqual(SocketFdInfo.psi.offset, 24)
+        # proc_fileinfo + socket_info through the unix-socket union arm.
+        self.assertGreaterEqual(ctypes.sizeof(SocketFdInfo), 792)
+
+    def test_plugin_does_not_invoke_endpoint_binaries(self):
+        path = os.path.join(ROOT, "plugins", "netstat_plugin.py")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("os.system", source)
+        self.assertNotIn("Popen", source)
+        for banned in ("netstat.exe", "/usr/bin/netstat", "/bin/netstat"):
+            self.assertNotIn(banned, source)
+
+    def test_live_listener_is_attributed_to_this_process(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("live /proc/net check")
+        import socket
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            matches = [
+                row
+                for row in collect_connections()
+                if row["proto"] == "tcp"
+                and row["local_ip"] == "127.0.0.1"
+                and row["local_port"] == port
+                and row["state"] == "LISTEN"
+            ]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["pid"], os.getpid())
+        self.assertTrue(matches[0]["program"])
 
 
 class BuildArtifactTests(unittest.TestCase):

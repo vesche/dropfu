@@ -91,7 +91,12 @@ zig build -Dtarget=aarch64-linux -Doptimize=ReleaseSmall --prefix zig-out/linux-
 
 ## Implemented vs deferred
 
-**Implemented now:** auth tokens, correlated routing, hardened transfers, shell (line mode), core FS commands, plugin install/run with limits, single-binary bundled CPython, `file`/`ipconfig`/`ping`/`ps`/`gzip`/`hash`/`portscan`, tiling panes, upload/download UI.
+**Implemented now:** auth tokens, correlated routing, hardened transfers, shell (line mode), core FS commands, plugin install/run with limits, single-binary bundled CPython, `file`/`ipconfig`/`netstat`/`ping`/`ps`/`gzip`/`hash`/`portscan`, tiling panes, upload/download UI, and a structured remote file manager.
+
+Run `file-manager` in any command pane to open the keyboard-driven file browser.
+Use `j`/`k` to move, `h`/`l` to navigate, `/` to filter, `d` to download,
+`c` to copy, `m` or `F2` to move/rename, `Delete` to remove a file, and `q`
+to return to the command pane.
 
 **Deferred:** camera/mic/bluetooth/ssh plugins, full PTY/ConPTY interactive terminal, memdump/procdump wrappers, multi-user RBAC.
 

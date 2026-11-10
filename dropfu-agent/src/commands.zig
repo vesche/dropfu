@@ -8,6 +8,7 @@ const plugin_runtime = @import("plugin_runtime.zig");
 pub const Action = enum { shell, seppuku };
 pub const Result = union(enum) {
     output: []const u8,
+    json: []const u8,
     action: Action,
 };
 
@@ -24,6 +25,8 @@ pub fn dispatch(
 ) !Result {
     if (eql(cmd, "pwd")) return .{ .output = try cmdPwd(allocator, io) };
     if (eql(cmd, "ls")) return .{ .output = try cmdLs(allocator, io, args) };
+    if (eql(cmd, "file-manager.list")) return .{ .json = try cmdFileManagerList(allocator, io, args) };
+    if (eql(cmd, "file-manager.preview")) return .{ .json = try cmdFileManagerPreview(allocator, io, args) };
     if (eql(cmd, "cat")) return .{ .output = try cmdCat(allocator, io, args) };
     if (eql(cmd, "find")) return .{ .output = try cmdFind(allocator, io, args) };
     if (eql(cmd, "cp")) return .{ .output = try cmdCp(allocator, io, args) };
@@ -64,6 +67,157 @@ fn cmdLs(allocator: Allocator, io: std.Io, args: []const []const u8) ![]const u8
     }
     if (out.writer.buffered().len == 0) try out.writer.writeAll("(empty directory)\n");
     return try out.toOwnedSlice();
+}
+
+const FileManagerEntry = struct {
+    name: []const u8,
+    path: []const u8,
+    kind: []const u8,
+    size: u64,
+    modified: i64,
+};
+
+const FileManagerList = struct {
+    path: []const u8,
+    parent: []const u8,
+    entries: []const FileManagerEntry,
+    truncated: bool,
+};
+
+const FileManagerPreview = struct {
+    path: []const u8,
+    name: []const u8,
+    kind: []const u8,
+    size: u64,
+    modified: i64,
+    text: ?[]const u8,
+    binary: bool,
+    truncated: bool,
+};
+
+const FILE_MANAGER_ENTRY_LIMIT = 2000;
+const FILE_MANAGER_LIST_BUDGET = 96 * 1024;
+const FILE_MANAGER_PREVIEW_LIMIT = 32 * 1024;
+
+fn cmdFileManagerList(allocator: Allocator, io: std.Io, args: []const []const u8) ![]const u8 {
+    const requested = if (args.len > 0) args[0] else ".";
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try std.Io.Dir.cwd().realPathFile(io, requested, &path_buf);
+    const resolved = path_buf[0..path_len];
+
+    var dir = try std.Io.Dir.openDirAbsolute(io, resolved, .{ .iterate = true });
+    defer dir.close(io);
+
+    var arena_impl = std.heap.ArenaAllocator.init(allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var entries: std.ArrayList(FileManagerEntry) = .empty;
+    defer entries.deinit(arena);
+
+    var truncated = false;
+    var estimated_json_bytes: usize = resolved.len * 8 + 256;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entries.items.len >= FILE_MANAGER_ENTRY_LIMIT) {
+            truncated = true;
+            break;
+        }
+        // WebSocket text frames and JSON both require valid UTF-8. Unix file
+        // names can contain arbitrary bytes, so omit names that cannot be
+        // represented safely in this UI.
+        if (!std.unicode.utf8ValidateSlice(entry.name)) continue;
+
+        const name = try arena.dupe(u8, entry.name);
+        const full_path = try std.fs.path.join(arena, &.{ resolved, name });
+        // The structured JSON is embedded in the result envelope as a string.
+        // Keep enough headroom for both rounds of JSON escaping and the 256 KiB
+        // protocol frame limit.
+        const entry_budget = (name.len + full_path.len) * 8 + 160;
+        if (estimated_json_bytes + entry_budget > FILE_MANAGER_LIST_BUDGET) {
+            truncated = true;
+            break;
+        }
+        estimated_json_bytes += entry_budget;
+        const stat = dir.statFile(io, entry.name, .{}) catch null;
+        const kind = fileManagerKind(if (stat) |s| s.kind else entry.kind);
+        try entries.append(arena, .{
+            .name = name,
+            .path = full_path,
+            .kind = kind,
+            .size = if (stat) |s| s.size else 0,
+            .modified = if (stat) |s| s.mtime.toSeconds() else 0,
+        });
+    }
+
+    const parent = std.fs.path.dirname(resolved) orelse resolved;
+    return std.json.Stringify.valueAlloc(allocator, FileManagerList{
+        .path = resolved,
+        .parent = parent,
+        .entries = entries.items,
+        .truncated = truncated,
+    }, .{});
+}
+
+fn cmdFileManagerPreview(allocator: Allocator, io: std.Io, args: []const []const u8) ![]const u8 {
+    if (args.len == 0) return error.MissingFilePath;
+    const requested = args[0];
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try std.Io.Dir.cwd().realPathFile(io, requested, &path_buf);
+    const resolved = path_buf[0..path_len];
+    const stat = try std.Io.Dir.cwd().statFile(io, resolved, .{});
+
+    if (stat.kind == .directory) return error.IsDirectory;
+
+    const file = try std.Io.Dir.openFileAbsolute(io, resolved, .{});
+    defer file.close(io);
+
+    const max_read: usize = @intCast(@min(
+        stat.size,
+        @as(u64, FILE_MANAGER_PREVIEW_LIMIT + 1),
+    ));
+    const buf = try allocator.alloc(u8, max_read);
+    defer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    const truncated = stat.size > FILE_MANAGER_PREVIEW_LIMIT;
+    const visible_len = @min(n, FILE_MANAGER_PREVIEW_LIMIT);
+    const visible = validTextPrefix(buf[0..visible_len], truncated);
+    const is_text = visible != null and std.mem.indexOfScalar(u8, visible.?, 0) == null;
+
+    return std.json.Stringify.valueAlloc(allocator, FileManagerPreview{
+        .path = resolved,
+        .name = std.fs.path.basename(resolved),
+        .kind = fileManagerKind(stat.kind),
+        .size = stat.size,
+        .modified = stat.mtime.toSeconds(),
+        .text = if (is_text) visible else null,
+        .binary = !is_text,
+        .truncated = truncated,
+    }, .{});
+}
+
+fn fileManagerKind(kind: std.Io.File.Kind) []const u8 {
+    return switch (kind) {
+        .directory => "directory",
+        .file => "file",
+        .sym_link => "symlink",
+        else => "other",
+    };
+}
+
+fn validTextPrefix(data: []const u8, truncated: bool) ?[]const u8 {
+    if (std.unicode.utf8ValidateSlice(data)) return data;
+    if (!truncated) return null;
+    // The preview boundary may split one UTF-8 codepoint. Only trim enough
+    // bytes to repair that boundary; invalid data elsewhere remains binary.
+    var trim: usize = 1;
+    while (trim <= 3 and trim <= data.len) : (trim += 1) {
+        const candidate = data[0 .. data.len - trim];
+        if (std.unicode.utf8ValidateSlice(candidate)) return candidate;
+    }
+    return null;
 }
 
 fn cmdCat(allocator: Allocator, io: std.Io, args: []const []const u8) ![]const u8 {
@@ -808,4 +962,28 @@ pub fn globMatchInsensitive(pattern: []const u8, name: []const u8) bool {
 
 fn toLower(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+test "file manager list returns structured JSON" {
+    const allocator = std.testing.allocator;
+    const data = try cmdFileManagerList(allocator, std.testing.io, &.{"."});
+    defer allocator.free(data);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(root.get("path") != null);
+    try std.testing.expect(root.get("parent") != null);
+    const entries = root.get("entries") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entries == .array);
+}
+
+test "file manager text preview boundary validation" {
+    try std.testing.expectEqualStrings("plain text", validTextPrefix("plain text", false).?);
+    try std.testing.expect(validTextPrefix(&.{ 0xff, 0xfe }, false) == null);
+    const split_utf8 = [_]u8{ 'a', 0xe2, 0x82 };
+    try std.testing.expectEqualStrings("a", validTextPrefix(&split_utf8, true).?);
 }

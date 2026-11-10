@@ -47,6 +47,7 @@ export interface CommandPayload {
 export interface ResultPayload {
   status: "success" | "error" | string;
   data: string;
+  content_type?: string;
 }
 
 export interface ShellPayload {
@@ -146,7 +147,8 @@ export function parseMessage(raw: unknown): AnyMessage | null {
           !Array.isArray(payload.args) || !payload.args.every((arg) => typeof arg === "string")) return null;
       break;
     case MSG_RESULT:
-      if (typeof payload.status !== "string" || typeof payload.data !== "string") return null;
+      if (typeof payload.status !== "string" || typeof payload.data !== "string" ||
+          (payload.content_type !== undefined && typeof payload.content_type !== "string")) return null;
       break;
     case MSG_SHELL_DATA:
       if (typeof obj.agent_id !== "string" || !isHexId(obj.agent_id, 128) || typeof payload.data !== "string" ||

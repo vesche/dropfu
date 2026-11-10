@@ -12,6 +12,7 @@ interface Props {
   paneId: string;
   isActive: boolean;
   onFocus: () => void;
+  onOpenFileManager: () => void;
 }
 
 const HISTORY_MAX = 200;
@@ -232,6 +233,12 @@ export default function CommandPane(props: Props) {
 
     if (status() !== "connected") {
       pushOutput(props.paneId, { kind: "error", text: "not connected to server", ts: Date.now() / 1000 });
+      return;
+    }
+
+    if (cmd === "file-manager") {
+      setPaneAgent(props.paneId, agentId);
+      props.onOpenFileManager();
       return;
     }
 

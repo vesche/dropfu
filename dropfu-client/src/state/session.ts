@@ -35,6 +35,7 @@ export interface AppState {
   outputs: Record<string, OutputLine[]>;
   panes: Record<string, PaneMeta>;
   requestToPane: Record<string, string>;
+  silentRequests: Record<string, boolean>;
   transfers: Record<string, TransferState>;
   authenticated: boolean;
   authError: string | null;
@@ -47,6 +48,7 @@ const [state, setState] = createStore<AppState>({
   outputs: {},
   panes: {},
   requestToPane: {},
+  silentRequests: {},
   transfers: {},
   authenticated: false,
   authError: null,
@@ -106,14 +108,18 @@ export function deletePane(paneId: string) {
       delete s.outputs[paneId];
       delete s.panes[paneId];
       for (const [req, pid] of Object.entries(s.requestToPane)) {
-        if (pid === paneId) delete s.requestToPane[req];
+        if (pid === paneId) {
+          delete s.requestToPane[req];
+          delete s.silentRequests[req];
+        }
       }
     }),
   );
 }
 
-export function bindRequest(requestId: string, paneId: string) {
+export function bindRequest(requestId: string, paneId: string, silent = false) {
   setState("requestToPane", requestId, paneId);
+  setState("silentRequests", requestId, silent);
   setState(
     produce((s) => {
       if (!s.panes[paneId]) {
@@ -128,11 +134,16 @@ export function resolveRequest(requestId: string): string | null {
   return state.requestToPane[requestId] ?? null;
 }
 
+export function isSilentRequest(requestId: string): boolean {
+  return state.silentRequests[requestId] === true;
+}
+
 export function completeRequest(requestId: string) {
   setState(
     produce((s) => {
       const paneId = s.requestToPane[requestId];
       delete s.requestToPane[requestId];
+      delete s.silentRequests[requestId];
       if (paneId && s.panes[paneId]) {
         s.panes[paneId].pendingRequestIds = s.panes[paneId].pendingRequestIds.filter((id) => id !== requestId);
       }

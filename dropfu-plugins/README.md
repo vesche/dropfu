@@ -8,6 +8,7 @@ Cross-platform Python plugins packaged as zipapps (`.pyz`) for dropfu-agent.
 |--------|------|-------------|
 | `file` | filetype | Magic-byte file identification |
 | `ipconfig` | ifaddr | Network interfaces |
+| `netstat` | stdlib | TCP/UDP sockets from kernel tables (not the `netstat` binary) |
 | `ping` | ping3 | ICMP ping |
 | `ps` | stdlib / native OS interfaces | Process list |
 | `gzip` | stdlib | tar+gzip compress/decompress (path-safe) |
@@ -31,5 +32,7 @@ Artifacts land in `dist/*.pyz`. Copy into the server plugin directory.
 - Pure-Python dependencies are compiled and included in each `.pyz`.
 - Native wheels/extensions are rejected because a zipapp cannot load them
   portably. Plugins must not depend on endpoint-installed Python packages.
+  `psutil` is not used for that reason; `netstat` reads `/proc`, IP Helper,
+  or `libproc` directly.
 - Agents execute plugins with their bundled CPython 3.14.10 runtime; endpoint
   Python installations and environment customization are ignored.

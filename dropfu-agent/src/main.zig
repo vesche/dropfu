@@ -315,6 +315,10 @@ fn handleText(
             defer allocator.free(data);
             try sendResult(allocator, io, stream, write_mutex, msg_id, agent_id, "success", data);
         },
+        .json => |data| {
+            defer allocator.free(data);
+            try sendJsonResult(allocator, io, stream, write_mutex, msg_id, agent_id, "success", data);
+        },
         .action => |act| switch (act) {
             .shell => {
                 if (ss.shell != null) {
@@ -475,6 +479,32 @@ fn sendResult(
         .agent_id = agent_id,
         .timestamp = protocol.timestamp(io),
         .payload = .{ .status = status, .data = data },
+    });
+    defer allocator.free(msg);
+    write_mutex.lockUncancelable(io);
+    defer write_mutex.unlock(io);
+    try websocket.sendText(stream, msg);
+}
+
+fn sendJsonResult(
+    allocator: Allocator,
+    io: std.Io,
+    stream: websocket.Conn,
+    write_mutex: *std.Io.Mutex,
+    msg_id: []const u8,
+    agent_id: []const u8,
+    status: []const u8,
+    data: []const u8,
+) !void {
+    const msg = try protocol.serialize(allocator, protocol.ResultMsg{
+        .id = msg_id,
+        .agent_id = agent_id,
+        .timestamp = protocol.timestamp(io),
+        .payload = .{
+            .status = status,
+            .data = data,
+            .content_type = "application/json",
+        },
     });
     defer allocator.free(msg);
     write_mutex.lockUncancelable(io);

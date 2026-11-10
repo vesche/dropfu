@@ -31,7 +31,7 @@ PLUGIN_DEPS = {
     "file_plugin.py": ["filetype==1.2.0"],
     "ipconfig_plugin.py": ["ifaddr==0.2.0"],
     "ping_plugin.py": ["ping3==4.0.8"],
-    # hash_plugin.py and portscan_plugin.py are stdlib-only
+    # hash, netstat, and portscan are stdlib-only
 }
 
 

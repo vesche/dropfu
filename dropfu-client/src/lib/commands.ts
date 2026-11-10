@@ -19,6 +19,7 @@ export const SECTIONS: CommandSection[] = [
   {
     title: "File & Navigation",
     commands: [
+      { usage: "file-manager",           description: "Open the interactive remote file manager", local: true },
       { usage: "pwd",                    description: "Print the agent's current working directory" },
       { usage: "ls [path]",              description: "List directory contents" },
       { usage: "cat <file>",             description: "Display file contents (up to ~1 KB)" },
@@ -52,6 +53,7 @@ export const SECTIONS: CommandSection[] = [
 export const PLUGINS: PluginDef[] = [
   { name: "file",     usage: "file <path> [path2 ...]",                description: "Identify file types" },
   { name: "ipconfig", usage: "ipconfig",                               description: "Display network interfaces" },
+  { name: "netstat",  usage: "netstat [--tcp|--udp] [--listen] [--state STATE]", description: "List TCP/UDP sockets" },
   { name: "ping",     usage: "ping [--count N] [--timeout N] <target>", description: "Ping a host" },
   { name: "ps",       usage: "ps [--sort cpu|mem|pid] [--top N]",      description: "List running processes" },
   { name: "gzip",     usage: "gzip compress|decompress <path> [opts]", description: "Compress/decompress files" },

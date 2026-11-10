@@ -5,6 +5,7 @@ import {
   completeRequest,
   deletePane,
   ensurePane,
+  isSilentRequest,
   resolveRequest,
   setState,
   state,
@@ -15,6 +16,7 @@ describe("session request routing", () => {
     setState("outputs", {});
     setState("panes", {});
     setState("requestToPane", {});
+    setState("silentRequests", {});
     setState("transfers", {});
     setState("selectedAgentId", null);
   });
@@ -41,9 +43,11 @@ describe("session request routing", () => {
   });
 
   it("removes request mappings when a pane is deleted", () => {
-    bindRequest("request-1", "left");
+    bindRequest("request-1", "left", true);
+    assert.equal(isSilentRequest("request-1"), true);
     deletePane("left");
     assert.equal(resolveRequest("request-1"), null);
+    assert.equal(isSilentRequest("request-1"), false);
     assert.equal(state.panes.left, undefined);
   });
 });
