@@ -179,7 +179,10 @@ class WebSocketClient:
         deadline = time.monotonic() + timeout
         observed: list[dict] = []
         while time.monotonic() < deadline:
-            message = self.receive(max(0.1, deadline - time.monotonic()))
+            try:
+                message = self.receive(max(0.1, deadline - time.monotonic()))
+            except TimeoutError:
+                break
             observed.append(message)
             if predicate(message):
                 return message
@@ -425,7 +428,8 @@ def main() -> None:
             ws.wait_for(
                 lambda msg: msg.get("type") == "shell_data"
                 and msg.get("id") == shell_id
-                and "syntax error" in msg["payload"].get("data", "")
+                # dash reports "Syntax error"; bash reports "syntax error".
+                and "syntax error" in msg["payload"].get("data", "").lower()
             )
             ws.send(
                 envelope(
