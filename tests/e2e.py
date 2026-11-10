@@ -321,6 +321,8 @@ def main() -> None:
                 encoding="utf-8",
             )
             fake_python.chmod(0o755)
+            runtime_tmp = Path(agent_cwd, "runtime-tmp")
+            runtime_tmp.mkdir()
             agent_env.update(
                 {
                     "DROPFU_AGENT_TOKEN": AGENT_TOKEN,
@@ -332,6 +334,8 @@ def main() -> None:
                     "PATH": str(fake_path) + os.pathsep + agent_env.get("PATH", ""),
                     "PYTHONHOME": str(Path(agent_cwd, "invalid-python-home")),
                     "PYTHONPATH": str(Path(agent_cwd, "invalid-python-path")),
+                    "TMPDIR": str(runtime_tmp),
+                    "TEMP": str(runtime_tmp),
                 }
             )
             invalid_agent_env = agent_env.copy()
@@ -482,6 +486,8 @@ def main() -> None:
                 ["run", "portscan", "--ports", str(client_port), "--timeout", "0.1", "127.0.0.1"],
             )
             assert str(client_port) in scan["payload"]["data"], scan
+            runtime_dirs = set(runtime_tmp.glob(".dropfu-python-*"))
+            assert len(runtime_dirs) == 1, runtime_dirs
 
             installed_ps = command(ws, agent_id, "000000000000000c", "plugin", ["install", "ps"])
             assert "installed" in installed_ps["payload"]["data"], installed_ps
@@ -506,6 +512,7 @@ def main() -> None:
                 ["run", "file", "plugins/portscan.pyz"],
             )
             assert "application/zip" in file_result["payload"]["data"], file_result
+            assert set(runtime_tmp.glob(".dropfu-python-*")) == runtime_dirs
 
             upload_data = b"dropfu-e2e-upload\x00\xff"
             upload_path = str(Path(agent_cwd, "uploaded.bin"))

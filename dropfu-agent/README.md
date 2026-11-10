@@ -47,9 +47,10 @@ authenticated HTTP from the server. The endpoint does **not** need Python
 installed: a target-specific CPython 3.14.10 distribution is carried inside the
 single agent executable and launched by absolute path in isolated mode.
 
-For process isolation and enforceable time/output limits, the runtime is
-expanded into a random private temporary directory only while a plugin runs and
-is removed immediately afterward. `PYTHONHOME`, `PYTHONPATH`, user site
+For process isolation and enforceable time/output limits, every plugin still
+runs as a child process. The runtime is expanded lazily into one random private
+temporary directory, reused by later plugin runs, and removed when the agent
+exits normally or self-destructs. `PYTHONHOME`, `PYTHONPATH`, user site
 packages, and `python`/`python3` from `PATH` are ignored.
 
 Only pure-Python plugin dependencies are accepted. Native dependencies must be

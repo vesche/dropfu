@@ -11,6 +11,10 @@ pub const Result = union(enum) {
     action: Action,
 };
 
+pub fn deinitPluginRuntime(io: std.Io) void {
+    plugin_runtime.deinit(io);
+}
+
 pub fn dispatch(
     allocator: Allocator,
     io: std.Io,
@@ -601,6 +605,7 @@ fn closePipe(fds: [2]c_int) void {
 }
 
 pub fn doSeppuku(io: std.Io, allocator: Allocator) void {
+    deinitPluginRuntime(io);
     std.Io.Dir.cwd().deleteTree(io, "plugins") catch {};
     if (std.process.executablePathAlloc(io, allocator)) |path| {
         defer allocator.free(path);

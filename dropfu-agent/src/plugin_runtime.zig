@@ -6,6 +6,10 @@ const embedded_python = @import("embedded_python.zig");
 
 const plugin_dir = "plugins";
 
+pub fn deinit(io: std.Io) void {
+    embedded_python.deinit(io);
+}
+
 pub fn install(allocator: Allocator, io: std.Io, environ: std.process.Environ, name: []const u8) ![]const u8 {
     if (!protocol.validatePluginName(name)) return allocator.dupe(u8, "error: invalid plugin name");
 

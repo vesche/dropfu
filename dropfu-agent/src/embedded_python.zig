@@ -24,9 +24,9 @@ const max_runtime_file_bytes: u64 = 256 * 1024 * 1024;
 
 /// Execute a plugin with the CPython distribution carried inside the agent.
 ///
-/// The runtime is expanded into a private, random temporary directory for the
-/// duration of this invocation, then removed. The endpoint never needs Python
-/// installed and no runtime installation is left behind.
+/// The runtime is expanded lazily into one private temporary directory and
+/// reused for the lifetime of the agent. Each plugin still runs in its own
+/// process so time and output limits remain enforceable.
 pub fn runPlugin(
     allocator: Allocator,
     io: std.Io,
@@ -34,38 +34,7 @@ pub fn runPlugin(
     plugin_path: []const u8,
     args: []const []const u8,
 ) !std.process.RunResult {
-    if (runtime_data.archive.len == 0) return error.EmbeddedPythonUnavailable;
-
-    const temp_base = try tempBaseOwned(allocator, environ);
-    defer allocator.free(temp_base);
-
-    var nonce: [16]u8 = undefined;
-    io.random(&nonce);
-    const nonce_hex = std.fmt.bytesToHex(nonce, .lower);
-    const runtime_leaf = try std.fmt.allocPrint(allocator, ".dropfu-python-{s}", .{nonce_hex});
-    defer allocator.free(runtime_leaf);
-    const runtime_root = try std.fs.path.join(
-        allocator,
-        &.{ temp_base, runtime_leaf },
-    );
-    defer allocator.free(runtime_root);
-
-    var runtime_permissions: std.Io.Dir.Permissions = .default_dir;
-    if (builtin.os.tag != .windows) {
-        runtime_permissions = .fromMode(0o700);
-    }
-    if (try std.Io.Dir.cwd().createDirPathStatus(io, runtime_root, runtime_permissions) == .existed) {
-        return error.RuntimeDirectoryCollision;
-    }
-    defer std.Io.Dir.cwd().deleteTree(io, runtime_root) catch {};
-    try extractRuntime(io, runtime_root);
-
-    const python_relative = switch (builtin.os.tag) {
-        .windows => "python/python.exe",
-        else => "python/bin/python3",
-    };
-    const python_exe = try std.fs.path.join(allocator, &.{ runtime_root, python_relative });
-    defer allocator.free(python_exe);
+    const python_exe = try ensureRuntime(allocator, io, environ);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -81,6 +50,83 @@ pub fn runPlugin(
         .stderr_limit = .limited(256 * 1024),
         .timeout = .{ .duration = .{ .raw = .fromSeconds(120), .clock = .awake } },
     });
+}
+
+const RuntimeState = struct {
+    allocator: Allocator,
+    root: []u8,
+    python_exe: []u8,
+
+    fn init(allocator: Allocator, io: std.Io, environ: std.process.Environ) !RuntimeState {
+        if (runtime_data.archive.len == 0) return error.EmbeddedPythonUnavailable;
+
+        const temp_base = try tempBaseOwned(allocator, environ);
+        defer allocator.free(temp_base);
+
+        var nonce: [16]u8 = undefined;
+        io.random(&nonce);
+        const nonce_hex = std.fmt.bytesToHex(nonce, .lower);
+        const runtime_leaf = try std.fmt.allocPrint(allocator, ".dropfu-python-{s}", .{nonce_hex});
+        defer allocator.free(runtime_leaf);
+        const runtime_root = try std.fs.path.join(allocator, &.{ temp_base, runtime_leaf });
+        errdefer allocator.free(runtime_root);
+
+        var runtime_permissions: std.Io.Dir.Permissions = .default_dir;
+        if (builtin.os.tag != .windows) {
+            runtime_permissions = .fromMode(0o700);
+        }
+        if (try std.Io.Dir.cwd().createDirPathStatus(io, runtime_root, runtime_permissions) == .existed) {
+            return error.RuntimeDirectoryCollision;
+        }
+        errdefer std.Io.Dir.cwd().deleteTree(io, runtime_root) catch {};
+        try extractRuntime(io, runtime_root);
+
+        const python_relative = switch (builtin.os.tag) {
+            .windows => "python/python.exe",
+            else => "python/bin/python3",
+        };
+        const python_exe = try std.fs.path.join(allocator, &.{ runtime_root, python_relative });
+        errdefer allocator.free(python_exe);
+
+        return .{
+            .allocator = allocator,
+            .root = runtime_root,
+            .python_exe = python_exe,
+        };
+    }
+
+    fn deinit(self: *RuntimeState, io: std.Io) void {
+        std.Io.Dir.cwd().deleteTree(io, self.root) catch {};
+        self.allocator.free(self.python_exe);
+        self.allocator.free(self.root);
+        self.* = undefined;
+    }
+};
+
+var runtime_mutex: std.Io.Mutex = .init;
+var runtime_state: ?RuntimeState = null;
+
+fn ensureRuntime(
+    allocator: Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+) ![]const u8 {
+    runtime_mutex.lockUncancelable(io);
+    defer runtime_mutex.unlock(io);
+
+    if (runtime_state) |*state| return state.python_exe;
+    runtime_state = try RuntimeState.init(allocator, io, environ);
+    return runtime_state.?.python_exe;
+}
+
+/// Remove the process-lifetime runtime cache. `process.exit` bypasses defers,
+/// so callers must invoke this explicitly before self-destruction.
+pub fn deinit(io: std.Io) void {
+    runtime_mutex.lockUncancelable(io);
+    defer runtime_mutex.unlock(io);
+
+    if (runtime_state) |*state| state.deinit(io);
+    runtime_state = null;
 }
 
 fn tempBaseOwned(allocator: Allocator, environ: std.process.Environ) ![]u8 {

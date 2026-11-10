@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const environ = init.minimal.environ;
+    defer commands.deinitPluginRuntime(io);
 
     const host = init.environ_map.get("DROPFU_SERVER_HOST") orelse "127.0.0.1";
     const port = envPort(init.environ_map, "DROPFU_SERVER_PORT", 9443) catch |e| {
